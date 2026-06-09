@@ -1,5 +1,7 @@
 # Light-WAM
 
+[![arXiv](https://img.shields.io/badge/arXiv-2606.08242-b31b1b.svg)](https://arxiv.org/abs/2606.08242)
+
 Codebase for **Light-WAM: Efficient World Action Models with State-Fusion Action Decoding**. This repository provides training and evaluation pipelines for **Light-WAM** on **LIBERO** and **RoboTwin2.0**.
 
 ## What Is Light-WAM?
@@ -171,6 +173,18 @@ CKPT=/path/to/checkpoints/weights/xxxx.pt bash scripts/eval_robotwin.sh
 ```
 
 ## Citation
+
+```bibtex
+@misc{li2026lightwam,
+  title         = {Light-WAM: Efficient World Action Models with State-Fusion Action Decoding},
+  author        = {Ziang Li and Dongzhou Cheng and Yibin Wang and Shiyue Wang and Xiaoyang Xu and Lingxuan Weng and Juan Wang and Jiaqi Wang},
+  year          = {2026},
+  eprint        = {2606.08242},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.RO},
+  url           = {https://arxiv.org/abs/2606.08242}
+}
+```
 
 ## Acknowledgements
 

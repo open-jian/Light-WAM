@@ -1,0 +1,91 @@
+{
+    "run_id": "eval_libero_single_2026-05-05_02-01-35_31151_wam_adapter_13B_query_adapted_layer5_02_step_060000",
+    "ckpt": "",
+    "config": "",
+    "suite_stats": {
+        "libero_goal": {
+            "total_tasks": 10,
+            "total_trials": 500,
+            "total_successes": 489,
+            "total_time": 6084.20921754837,
+            "max_time": 800.7434780597687
+        }
+    },
+    "task_results": {
+        "libero_goal_9": {
+            "success_rate": 96.0,
+            "duration": 749.1265995502472,
+            "total_episodes": 50,
+            "successes": 48,
+            "task_description": "put the wine bottle on the rack"
+        },
+        "libero_goal_7": {
+            "success_rate": 100.0,
+            "duration": 501.209513425827,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "turn on the stove"
+        },
+        "libero_goal_8": {
+            "success_rate": 98.0,
+            "duration": 500.913610458374,
+            "total_episodes": 50,
+            "successes": 49,
+            "task_description": "put the bowl on the plate"
+        },
+        "libero_goal_5": {
+            "success_rate": 98.0,
+            "duration": 668.5464611053467,
+            "total_episodes": 50,
+            "successes": 49,
+            "task_description": "push the plate to the front of the stove"
+        },
+        "libero_goal_3": {
+            "success_rate": 96.0,
+            "duration": 800.7434780597687,
+            "total_episodes": 50,
+            "successes": 48,
+            "task_description": "open the top drawer and put the bowl inside"
+        },
+        "libero_goal_1": {
+            "success_rate": 100.0,
+            "duration": 510.98401713371277,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "put the bowl on the stove"
+        },
+        "libero_goal_0": {
+            "success_rate": 96.0,
+            "duration": 707.5900478363037,
+            "total_episodes": 50,
+            "successes": 48,
+            "task_description": "open the middle drawer of the cabinet"
+        },
+        "libero_goal_6": {
+            "success_rate": 96.0,
+            "duration": 570.2085735797882,
+            "total_episodes": 50,
+            "successes": 48,
+            "task_description": "put the cream cheese in the bowl"
+        },
+        "libero_goal_2": {
+            "success_rate": 98.0,
+            "duration": 536.7229609489441,
+            "total_episodes": 50,
+            "successes": 49,
+            "task_description": "put the wine bottle on top of the cabinet"
+        },
+        "libero_goal_4": {
+            "success_rate": 100.0,
+            "duration": 538.163955450058,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "put the bowl on top of the cabinet"
+        }
+    },
+    "overall": {
+        "average_success_rate": 97.8,
+        "total_time": 6084.20921754837,
+        "average_task_time": 608.4209217548371
+    }
+}

@@ -1,0 +1,91 @@
+{
+    "run_id": "eval_libero_single_2026-05-05_01-57-04_27031_wam_adapter_13B_query_adapted_layer5_02_step_055000",
+    "ckpt": "",
+    "config": "",
+    "suite_stats": {
+        "libero_spatial": {
+            "total_tasks": 10,
+            "total_trials": 500,
+            "total_successes": 491,
+            "total_time": 4930.35843706131,
+            "max_time": 578.7135436534882
+        }
+    },
+    "task_results": {
+        "libero_spatial_1": {
+            "success_rate": 100.0,
+            "duration": 484.3534903526306,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the black bowl next to the ramekin and place it on the plate"
+        },
+        "libero_spatial_9": {
+            "success_rate": 100.0,
+            "duration": 503.24988889694214,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the black bowl on the wooden cabinet and place it on the plate"
+        },
+        "libero_spatial_4": {
+            "success_rate": 92.0,
+            "duration": 578.7135436534882,
+            "total_episodes": 50,
+            "successes": 46,
+            "task_description": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate"
+        },
+        "libero_spatial_6": {
+            "success_rate": 98.0,
+            "duration": 497.7053508758545,
+            "total_episodes": 50,
+            "successes": 49,
+            "task_description": "pick up the black bowl next to the cookie box and place it on the plate"
+        },
+        "libero_spatial_5": {
+            "success_rate": 96.0,
+            "duration": 521.3681635856628,
+            "total_episodes": 50,
+            "successes": 48,
+            "task_description": "pick up the black bowl on the ramekin and place it on the plate"
+        },
+        "libero_spatial_2": {
+            "success_rate": 100.0,
+            "duration": 446.27707505226135,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the black bowl from table center and place it on the plate"
+        },
+        "libero_spatial_8": {
+            "success_rate": 100.0,
+            "duration": 477.7406368255615,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the black bowl next to the plate and place it on the plate"
+        },
+        "libero_spatial_0": {
+            "success_rate": 100.0,
+            "duration": 450.25298023223877,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the black bowl between the plate and the ramekin and place it on the plate"
+        },
+        "libero_spatial_3": {
+            "success_rate": 96.0,
+            "duration": 448.8974003791809,
+            "total_episodes": 50,
+            "successes": 48,
+            "task_description": "pick up the black bowl on the cookie box and place it on the plate"
+        },
+        "libero_spatial_7": {
+            "success_rate": 100.0,
+            "duration": 521.799907207489,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the black bowl on the stove and place it on the plate"
+        }
+    },
+    "overall": {
+        "average_success_rate": 98.2,
+        "total_time": 4930.35843706131,
+        "average_task_time": 493.035843706131
+    }
+}

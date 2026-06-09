@@ -1,0 +1,91 @@
+{
+    "run_id": "eval_libero_single_2026-05-06_12-53-46_3232841_wam_adapter_13B_query_adapted_layer5_02_step_012500",
+    "ckpt": "",
+    "config": "",
+    "suite_stats": {
+        "libero_object": {
+            "total_tasks": 10,
+            "total_trials": 500,
+            "total_successes": 498,
+            "total_time": 5042.262358903885,
+            "max_time": 537.1790237426758
+        }
+    },
+    "task_results": {
+        "libero_object_1": {
+            "success_rate": 100.0,
+            "duration": 455.7095265388489,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the cream cheese and place it in the basket"
+        },
+        "libero_object_9": {
+            "success_rate": 98.0,
+            "duration": 485.14364218711853,
+            "total_episodes": 50,
+            "successes": 49,
+            "task_description": "pick up the orange juice and place it in the basket"
+        },
+        "libero_object_4": {
+            "success_rate": 100.0,
+            "duration": 525.7553775310516,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the ketchup and place it in the basket"
+        },
+        "libero_object_6": {
+            "success_rate": 100.0,
+            "duration": 522.1961853504181,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the butter and place it in the basket"
+        },
+        "libero_object_5": {
+            "success_rate": 100.0,
+            "duration": 519.9766507148743,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the tomato sauce and place it in the basket"
+        },
+        "libero_object_2": {
+            "success_rate": 100.0,
+            "duration": 472.0886950492859,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the salad dressing and place it in the basket"
+        },
+        "libero_object_8": {
+            "success_rate": 100.0,
+            "duration": 537.1790237426758,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the chocolate pudding and place it in the basket"
+        },
+        "libero_object_0": {
+            "success_rate": 100.0,
+            "duration": 536.5686800479889,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the alphabet soup and place it in the basket"
+        },
+        "libero_object_3": {
+            "success_rate": 98.0,
+            "duration": 496.43941140174866,
+            "total_episodes": 50,
+            "successes": 49,
+            "task_description": "pick up the bbq sauce and place it in the basket"
+        },
+        "libero_object_7": {
+            "success_rate": 100.0,
+            "duration": 491.20516633987427,
+            "total_episodes": 50,
+            "successes": 50,
+            "task_description": "pick up the milk and place it in the basket"
+        }
+    },
+    "overall": {
+        "average_success_rate": 99.6,
+        "total_time": 5042.262358903885,
+        "average_task_time": 504.22623589038847
+    }
+}

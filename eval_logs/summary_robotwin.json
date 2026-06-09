@@ -1,0 +1,258 @@
+{
+  "per_task": [
+    {
+      "task_name": "adjust_bottle",
+      "clean_success_rate": 1.0,
+      "random_success_rate": 1.0
+    },
+    {
+      "task_name": "beat_block_hammer",
+      "clean_success_rate": 0.83,
+      "random_success_rate": 0.8
+    },
+    {
+      "task_name": "blocks_ranking_rgb",
+      "clean_success_rate": 0.96,
+      "random_success_rate": 0.91
+    },
+    {
+      "task_name": "blocks_ranking_size",
+      "clean_success_rate": 0.57,
+      "random_success_rate": 0.54
+    },
+    {
+      "task_name": "click_alarmclock",
+      "clean_success_rate": 1.0,
+      "random_success_rate": 1.0
+    },
+    {
+      "task_name": "click_bell",
+      "clean_success_rate": 1.0,
+      "random_success_rate": 1.0
+    },
+    {
+      "task_name": "dump_bin_bigbin",
+      "clean_success_rate": 0.81,
+      "random_success_rate": 0.75
+    },
+    {
+      "task_name": "grab_roller",
+      "clean_success_rate": 1.0,
+      "random_success_rate": 0.98
+    },
+    {
+      "task_name": "handover_block",
+      "clean_success_rate": 0.71,
+      "random_success_rate": 0.59
+    },
+    {
+      "task_name": "handover_mic",
+      "clean_success_rate": 0.9,
+      "random_success_rate": 0.94
+    },
+    {
+      "task_name": "lift_pot",
+      "clean_success_rate": 0.93,
+      "random_success_rate": 0.93
+    },
+    {
+      "task_name": "move_can_pot",
+      "clean_success_rate": 0.57,
+      "random_success_rate": 0.74
+    },
+    {
+      "task_name": "move_playingcard_away",
+      "clean_success_rate": 0.93,
+      "random_success_rate": 0.92
+    },
+    {
+      "task_name": "move_stapler_pad",
+      "clean_success_rate": 0.26,
+      "random_success_rate": 0.34
+    },
+    {
+      "task_name": "hanging_mug",
+      "clean_success_rate": 0.25,
+      "random_success_rate": 0.17
+    },
+    {
+      "task_name": "open_laptop",
+      "clean_success_rate": 0.91,
+      "random_success_rate": 0.97
+    },
+    {
+      "task_name": "open_microwave",
+      "clean_success_rate": 0.76,
+      "random_success_rate": 0.59
+    },
+    {
+      "task_name": "pick_diverse_bottles",
+      "clean_success_rate": 0.61,
+      "random_success_rate": 0.57
+    },
+    {
+      "task_name": "pick_dual_bottles",
+      "clean_success_rate": 0.9,
+      "random_success_rate": 0.63
+    },
+    {
+      "task_name": "place_a2b_left",
+      "clean_success_rate": 0.84,
+      "random_success_rate": 0.83
+    },
+    {
+      "task_name": "place_a2b_right",
+      "clean_success_rate": 0.89,
+      "random_success_rate": 0.85
+    },
+    {
+      "task_name": "place_bread_basket",
+      "clean_success_rate": 0.81,
+      "random_success_rate": 0.8
+    },
+    {
+      "task_name": "place_bread_skillet",
+      "clean_success_rate": 0.92,
+      "random_success_rate": 0.82
+    },
+    {
+      "task_name": "place_can_basket",
+      "clean_success_rate": 0.57,
+      "random_success_rate": 0.57
+    },
+    {
+      "task_name": "place_cans_plasticbox",
+      "clean_success_rate": 0.37,
+      "random_success_rate": 0.68
+    },
+    {
+      "task_name": "place_container_plate",
+      "clean_success_rate": 0.99,
+      "random_success_rate": 0.94
+    },
+    {
+      "task_name": "place_dual_shoes",
+      "clean_success_rate": 0.53,
+      "random_success_rate": 0.51
+    },
+    {
+      "task_name": "place_empty_cup",
+      "clean_success_rate": 0.91,
+      "random_success_rate": 0.95
+    },
+    {
+      "task_name": "place_fan",
+      "clean_success_rate": 0.77,
+      "random_success_rate": 0.74
+    },
+    {
+      "task_name": "place_burger_fries",
+      "clean_success_rate": 0.95,
+      "random_success_rate": 0.98
+    },
+    {
+      "task_name": "place_mouse_pad",
+      "clean_success_rate": 0.58,
+      "random_success_rate": 0.62
+    },
+    {
+      "task_name": "place_object_basket",
+      "clean_success_rate": 0.81,
+      "random_success_rate": 0.72
+    },
+    {
+      "task_name": "place_object_scale",
+      "clean_success_rate": 0.72,
+      "random_success_rate": 0.74
+    },
+    {
+      "task_name": "place_object_stand",
+      "clean_success_rate": 0.78,
+      "random_success_rate": 0.85
+    },
+    {
+      "task_name": "place_phone_stand",
+      "clean_success_rate": 0.85,
+      "random_success_rate": 0.88
+    },
+    {
+      "task_name": "move_pillbottle_pad",
+      "clean_success_rate": 0.69,
+      "random_success_rate": 0.74
+    },
+    {
+      "task_name": "place_shoe",
+      "clean_success_rate": 0.84,
+      "random_success_rate": 0.87
+    },
+    {
+      "task_name": "press_stapler",
+      "clean_success_rate": 0.65,
+      "random_success_rate": 0.76
+    },
+    {
+      "task_name": "put_bottles_dustbin",
+      "clean_success_rate": 0.65,
+      "random_success_rate": 0.65
+    },
+    {
+      "task_name": "put_object_cabinet",
+      "clean_success_rate": 0.8,
+      "random_success_rate": 0.68
+    },
+    {
+      "task_name": "rotate_qrcode",
+      "clean_success_rate": 0.72,
+      "random_success_rate": 0.84
+    },
+    {
+      "task_name": "scan_object",
+      "clean_success_rate": 0.6,
+      "random_success_rate": 0.52
+    },
+    {
+      "task_name": "shake_bottle",
+      "clean_success_rate": 1.0,
+      "random_success_rate": 0.99
+    },
+    {
+      "task_name": "shake_bottle_horizontally",
+      "clean_success_rate": 1.0,
+      "random_success_rate": 0.98
+    },
+    {
+      "task_name": "stack_blocks_three",
+      "clean_success_rate": 0.65,
+      "random_success_rate": 0.67
+    },
+    {
+      "task_name": "stack_blocks_two",
+      "clean_success_rate": 0.94,
+      "random_success_rate": 0.91
+    },
+    {
+      "task_name": "stack_bowls_three",
+      "clean_success_rate": 0.65,
+      "random_success_rate": 0.72
+    },
+    {
+      "task_name": "stack_bowls_two",
+      "clean_success_rate": 0.91,
+      "random_success_rate": 0.97
+    },
+    {
+      "task_name": "stamp_seal",
+      "clean_success_rate": 0.6,
+      "random_success_rate": 0.63
+    },
+    {
+      "task_name": "turn_switch",
+      "clean_success_rate": 0.33,
+      "random_success_rate": 0.39
+    }
+  ],
+  "overall": {
+    "clean_mean_success_rate": 0.7643999999999997,
+    "random_mean_success_rate": 0.7633999999999999
+  }
+}
