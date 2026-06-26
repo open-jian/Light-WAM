@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1880" height="980" viewBox="0 0 1880 980">
+  <defs>
+    <style>
+      .title { font: 700 30px Arial, sans-serif; fill: #17202a; }
+      .subtitle { font: 16px Arial, sans-serif; fill: #52616b; }
+      .box-title { font: 700 18px Arial, sans-serif; fill: #17202a; }
+      .box-text { font: 14px Arial, sans-serif; fill: #25313b; }
+      .small { font: 12px Arial, sans-serif; fill: #52616b; }
+      .tiny { font: 11px Arial, sans-serif; fill: #52616b; }
+      .note { font: italic 13px Arial, sans-serif; fill: #5b6770; }
+      .box { stroke-width: 2; rx: 10; ry: 10; }
+      .input { fill: #f2f7ff; stroke: #4078c0; }
+      .frozen { fill: #f5f7fa; stroke: #7b8794; }
+      .train { fill: #fff7ed; stroke: #d97706; }
+      .action { fill: #ecfdf5; stroke: #059669; }
+      .video { fill: #f0f9ff; stroke: #0284c7; }
+      .memory { fill: #f5f3ff; stroke: #7c3aed; stroke-dasharray: 8 5; }
+      .loss { fill: #fff1f2; stroke: #e11d48; }
+      .arrow { stroke: #334155; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
+      .arrow-soft { stroke: #64748b; stroke-width: 1.8; fill: none; marker-end: url(#arrow-soft); }
+      .arrow-orange { stroke: #d97706; stroke-width: 2.2; fill: none; marker-end: url(#arrow-orange); }
+      .arrow-green { stroke: #059669; stroke-width: 2.2; fill: none; marker-end: url(#arrow-green); }
+      .arrow-blue { stroke: #0284c7; stroke-width: 2.2; fill: none; marker-end: url(#arrow-blue); }
+      .arrow-purple { stroke: #7c3aed; stroke-width: 2.2; fill: none; marker-end: url(#arrow-purple); stroke-dasharray: 8 5; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#334155"/>
+    </marker>
+    <marker id="arrow-soft" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#d97706"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#059669"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#0284c7"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#7c3aed"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1880" height="980" fill="#ffffff"/>
+  <text x="50" y="52" class="title">Light-WAM Architecture on LIBERO</text>
+  <text x="50" y="82" class="subtitle">Effective Wan2.1-T2V-1.3B config: frozen video backbone + LoRA/adapters + direct StateFusion action head</text>
+
+  <!-- Inputs -->
+  <rect x="50" y="130" width="300" height="180" class="box input"/>
+  <text x="72" y="165" class="box-title">LIBERO sample</text>
+  <text x="72" y="198" class="box-text">raw window: 33 steps</text>
+  <text x="72" y="223" class="box-text">sample video every 4 steps</text>
+  <text x="72" y="248" class="box-text">video: [B, 3, 9, 224, 448]</text>
+  <text x="72" y="273" class="box-text">action: [B, 32, 7]</text>
+  <text x="72" y="298" class="box-text">context: [B, 128, 4096]</text>
+
+  <rect x="50" y="360" width="300" height="105" class="box input"/>
+  <text x="72" y="395" class="box-title">Proprio + text condition</text>
+  <text x="72" y="428" class="box-text">proprio[0]: [B, 8] -> [B, 1, 4096]</text>
+  <text x="72" y="453" class="box-text">context becomes [B, 129, 4096]</text>
+
+  <!-- VAE -->
+  <rect x="430" y="178" width="285" height="126" class="box frozen"/>
+  <text x="452" y="212" class="box-title">Frozen Wan VAE</text>
+  <text x="452" y="245" class="box-text">spatial downsample: 8</text>
+  <text x="452" y="270" class="box-text">temporal downsample: 4</text>
+  <text x="452" y="295" class="box-text">latents: [B, 16, 3, 28, 56]</text>
+
+  <!-- Split branch labels -->
+  <text x="770" y="145" class="box-title" fill="#0284c7">Future-video training branch</text>
+  <text x="770" y="513" class="box-title" fill="#059669">Action decoding branch</text>
+
+  <!-- Future branch -->
+  <rect x="780" y="180" width="275" height="110" class="box video"/>
+  <text x="802" y="214" class="box-title">Low-res video latents</text>
+  <text x="802" y="247" class="box-text">spatial downsample x2</text>
+  <text x="802" y="272" class="box-text">[B, 16, 3, 14, 28]</text>
+
+  <rect x="1115" y="150" width="300" height="170" class="box train"/>
+  <text x="1137" y="184" class="box-title">Wan Video DiT + PEFT</text>
+  <text x="1137" y="217" class="box-text">30 blocks, hidden 1536</text>
+  <text x="1137" y="242" class="box-text">LoRA inside all blocks</text>
+  <text x="1137" y="267" class="box-text">adapters at layers 8/16/24</text>
+  <text x="1137" y="292" class="box-text">tokens: [B, 294, 1536]</text>
+
+  <rect x="1480" y="185" width="300" height="100" class="box video"/>
+  <text x="1502" y="219" class="box-title">Video head</text>
+  <text x="1502" y="252" class="box-text">flow prediction: [B, 16, 3, 14, 28]</text>
+  <text x="1502" y="277" class="box-text">loss on future latent steps</text>
+
+  <!-- Action branch -->
+  <rect x="780" y="545" width="275" height="115" class="box action"/>
+  <text x="802" y="579" class="box-title">Current observation latent</text>
+  <text x="802" y="612" class="box-text">first latent frame only</text>
+  <text x="802" y="637" class="box-text">[B, 16, 1, 28, 56]</text>
+
+  <rect x="1115" y="520" width="300" height="165" class="box train"/>
+  <text x="1137" y="554" class="box-title">Wan Video DiT + PEFT</text>
+  <text x="1137" y="587" class="box-text">tokens: [B, 392, 1536]</text>
+  <text x="1137" y="612" class="box-text">LoRA adjusts internal compute</text>
+  <text x="1137" y="637" class="box-text">adapter caches states</text>
+  <text x="1137" y="662" class="box-text">layers 8, 16, 24</text>
+
+  <rect x="1115" y="725" width="300" height="130" class="box train"/>
+  <text x="1137" y="759" class="box-title">Adapter states</text>
+  <text x="1137" y="792" class="box-text">backbone: [B, 392, 1536]</text>
+  <text x="1137" y="817" class="box-text">adapted:  [B, 392, 1536]</text>
+  <text x="1137" y="842" class="box-text">delta = adapted - backbone</text>
+
+  <rect x="1480" y="717.5" width="300" height="145" class="box action"/>
+  <text x="1502" y="751.5" class="box-title">StateFusionActionExpert</text>
+  <text x="1502" y="784.5" class="box-text">learned-query pooling: 16 slots</text>
+  <text x="1502" y="809.5" class="box-text">per-layer: [B, 1536] -> [B, 4608]</text>
+  <text x="1502" y="834.5" class="box-text">concat 3 layers -> [B, 13824]</text>
+  <text x="1502" y="859.5" class="box-text">MLP trunk -> action [B, 32, 7]</text>
+
+  <!-- Losses -->
+  <rect x="1495" y="525" width="285" height="70" class="box loss"/>
+  <text x="1517" y="558" class="box-title">Training losses</text>
+  <text x="1517" y="583" class="box-text">video flow loss + action MSE</text>
+
+  <!-- Memory insertion note -->
+  <rect x="780" y="725" width="275" height="130" class="box memory"/>
+  <text x="802" y="759" class="box-title">Natural memory slot</text>
+  <text x="802" y="792" class="box-text">history tokens / object slots</text>
+  <text x="802" y="817" class="box-text">should join after state extraction</text>
+  <text x="802" y="842" class="box-text">not as raw extra frames</text>
+
+  <!-- Arrows -->
+  <path d="M350 238 C380 238, 395 238, 430 238" class="arrow"/>
+  <path d="M350 415 C520 415, 520 315, 575 304" class="arrow-soft"/>
+
+  <path d="M715 240 C745 240, 750 235, 780 235" class="arrow-blue"/>
+  <path d="M1055 235 C1085 235, 1085 235, 1115 235" class="arrow-blue"/>
+  <path d="M1415 235 C1445 235, 1450 235, 1480 235" class="arrow-blue"/>
+  <path d="M1638 285 L1638 525" class="arrow-soft"/>
+
+  <path d="M575 304 C620 520, 700 600, 780 602" class="arrow-green"/>
+  <path d="M1055 602 C1085 602, 1085 602, 1115 602" class="arrow-green"/>
+  <path d="M1265 685 L1265 725" class="arrow-orange"/>
+  <path d="M1115 640 C1060 690, 1010 710, 930 725" class="arrow-purple"/>
+  <path d="M1415 790 C1445 790, 1450 790, 1480 790" class="arrow-orange"/>
+  <path d="M1055 790 C1085 790, 1085 790, 1115 790" class="arrow-purple"/>
+  <path d="M1638 717.5 L1638 595" class="arrow-soft"/>
+
+  <!-- Legend -->
+  <rect x="50" y="900" width="1730" height="48" fill="#f8fafc" stroke="#d7dee8" rx="8" ry="8"/>
+  <rect x="75" y="916" width="22" height="16" class="input"/>
+  <text x="105" y="929" class="tiny">input/data</text>
+  <rect x="190" y="916" width="22" height="16" class="frozen"/>
+  <text x="220" y="929" class="tiny">frozen pretrained module</text>
+  <rect x="390" y="916" width="22" height="16" class="train"/>
+  <text x="420" y="929" class="tiny">trainable PEFT / adapted state</text>
+  <rect x="650" y="916" width="22" height="16" class="action"/>
+  <text x="680" y="929" class="tiny">action path</text>
+  <rect x="790" y="916" width="22" height="16" class="video"/>
+  <text x="820" y="929" class="tiny">future-video path</text>
+  <rect x="980" y="916" width="22" height="16" class="memory"/>
+  <text x="1010" y="929" class="tiny">suggested memory insertion point</text>
+  <text x="1585" y="929" class="note">Numbers are LIBERO default shapes.</text>
+</svg>
