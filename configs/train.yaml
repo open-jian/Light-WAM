@@ -24,6 +24,8 @@ log_every: 10
 save_every: 100
 eval_every: 50
 eval_num_inference_steps: 10
+checkpoint:
+  max_to_keep: null
 
 # offline precompute
 precompute_batch_size: ${batch_size}
@@ -68,6 +70,12 @@ benchmark:
   measure_steps: 50
   output_filename: training_speed_benchmark.json
   description: null
+
+distributed:
+  debug_sync_train_step: false
+  chunked_collectives:
+    enabled: false
+    max_bytes: 65536
 
 # wandb
 wandb:

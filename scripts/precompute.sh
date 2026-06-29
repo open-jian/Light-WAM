@@ -4,7 +4,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
+LIGHTWAM_ENV_BIN="${LIGHTWAM_ENV_BIN:-}"
+if [[ -n "${LIGHTWAM_ENV_BIN}" ]]; then
+  export PATH="${LIGHTWAM_ENV_BIN}:${PATH}"
+fi
 export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}:${PYTHONPATH:-}"
+export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+NCCL_PROTO_DEFAULT="${NCCL_PROTO_DEFAULT:-unset}"
+if [[ -n "${NCCL_PROTO+x}" ]]; then
+  export NCCL_PROTO
+elif [[ "${NCCL_PROTO_DEFAULT}" == "unset" ]]; then
+  unset NCCL_PROTO
+elif [[ -n "${NCCL_PROTO_DEFAULT}" ]]; then
+  export NCCL_PROTO="${NCCL_PROTO_DEFAULT}"
+fi
 
 TARGET="${TARGET:-${1:-libero_spatial}}"
 PRECOMPUTE_GPU_IDS="${PRECOMPUTE_GPU_IDS:-0,1,2,3}"
@@ -59,6 +73,9 @@ echo "[precompute] task=${TASK_NAME}"
 echo "[precompute] dataset_dir=${DATASET_DIR}"
 echo "[precompute] text_cache_dir=${TEXT_CACHE_DIR}"
 echo "[precompute] latent_cache_dir=${LATENT_CACHE_DIR}"
+echo "[precompute] gpus=${PRECOMPUTE_GPU_IDS} num_processes=${PRECOMPUTE_NUM_PROCESSES} batch_size=${PRECOMPUTE_BATCH_SIZE}"
+echo "[precompute] lightwam_env_bin=${LIGHTWAM_ENV_BIN:-<none>}"
+echo "[precompute] NCCL_PROTO=${NCCL_PROTO:-<unset>}"
 
 if [[ "${RUN_TEXT}" == "true" ]]; then
   CUDA_VISIBLE_DEVICES="${PRECOMPUTE_GPU_IDS}" torchrun --standalone --nproc_per_node="${PRECOMPUTE_NUM_PROCESSES}" \

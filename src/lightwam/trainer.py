@@ -3,6 +3,7 @@ import json
 import inspect
 import os
 import re
+import shutil
 from math import ceil
 from pathlib import Path
 import time
@@ -18,6 +19,7 @@ from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, Se
 from torch.utils.data import DataLoader
 
 from .utils.fs import ensure_dir
+from .utils.chunked_collectives import install_chunked_collectives
 from .utils.logging_config import get_logger, setup_logging
 from .utils.pytorch_utils import set_global_seed
 from .utils.samplers import ResumableEpochSampler
@@ -50,6 +52,18 @@ class Wan22Trainer:
         self.max_steps = int(max_steps) if max_steps is not None else None
         self.log_every = int(cfg.log_every)
         self.save_every = int(cfg.save_every)
+        checkpoint_cfg = cfg.get("checkpoint", {}) or {}
+        checkpoint_max_to_keep = checkpoint_cfg.get("max_to_keep")
+        self.checkpoint_max_to_keep = (
+            None
+            if checkpoint_max_to_keep in (None, "", "null")
+            else int(checkpoint_max_to_keep)
+        )
+        if self.checkpoint_max_to_keep is not None and self.checkpoint_max_to_keep <= 0:
+            raise ValueError(
+                "`checkpoint.max_to_keep` must be positive or null, "
+                f"got {self.checkpoint_max_to_keep}."
+            )
         self.eval_every = int(cfg.eval_every)
         self.eval_num_inference_steps = int(cfg.eval_num_inference_steps)
         self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
@@ -103,6 +117,13 @@ class Wan22Trainer:
         self.benchmark_description = None if benchmark_description in (None, "", "null") else str(benchmark_description)
         self._benchmark_start_time: float | None = None
         self.wandb_enabled = bool(cfg.wandb.enabled)
+        distributed_cfg = cfg.get("distributed", {}) or {}
+        self.debug_sync_train_step = bool(distributed_cfg.get("debug_sync_train_step", False))
+        chunked_collectives_cfg = distributed_cfg.get("chunked_collectives", {}) or {}
+        self.chunked_collectives_enabled = bool(chunked_collectives_cfg.get("enabled", False))
+        self.chunked_collectives_max_bytes = int(chunked_collectives_cfg.get("max_bytes", 64 * 1024))
+        if self.chunked_collectives_enabled:
+            install_chunked_collectives(max_bytes=self.chunked_collectives_max_bytes)
         if self.benchmark_enabled:
             if self.benchmark_warmup_steps < 0:
                 raise ValueError(
@@ -171,6 +192,13 @@ class Wan22Trainer:
             self.benchmark_output_filename,
             self.benchmark_description,
         )
+        logger.info(
+            "Distributed workaround: debug_sync_train_step=%s chunked_collectives=%s max_bytes=%d",
+            self.debug_sync_train_step,
+            self.chunked_collectives_enabled,
+            self.chunked_collectives_max_bytes,
+        )
+        logger.info("Checkpoint retention: max_to_keep=%s", self.checkpoint_max_to_keep)
         worker_init_fn = set_global_seed(self.seed, get_worker_init_fn=True)
         self._assert_dataset_length_consistent(self.train_dataset, "train_dataset")
         if self.val_dataset is not None:
@@ -222,6 +250,7 @@ class Wan22Trainer:
             warmup_steps=warmup_steps,
         )
         self.global_step = 0
+        self._last_checkpoint_step: int | None = None
         self.epoch = 0
         self.batch_in_epoch = 0
 
@@ -244,6 +273,8 @@ class Wan22Trainer:
         self.model, self.optimizer, self.train_loader, self.scheduler = self.accelerator.prepare(
             self.model, self.optimizer, self.train_loader, self.scheduler
         )
+        if self.chunked_collectives_enabled:
+            install_chunked_collectives(max_bytes=self.chunked_collectives_max_bytes)
         prepared_model = self.accelerator.unwrap_model(self.model)
         if hasattr(prepared_model, "set_timing_breakdown"):
             prepared_model.set_timing_breakdown(
@@ -1349,20 +1380,70 @@ class Wan22Trainer:
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=True, indent=2)
 
+    @staticmethod
+    def _checkpoint_step_from_name(name: str) -> int | None:
+        match = re.fullmatch(r"step_(\d+)", name)
+        if match is None:
+            return None
+        return int(match.group(1))
+
+    def _prune_old_checkpoints(self):
+        if self.checkpoint_max_to_keep is None:
+            return
+
+        weight_entries: list[tuple[int, Path]] = []
+        for path in Path(self.weights_dir).glob("step_*.pt"):
+            step = self._checkpoint_step_from_name(path.stem)
+            if step is not None:
+                weight_entries.append((step, path))
+
+        state_entries: list[tuple[int, Path]] = []
+        for path in Path(self.state_dir).glob("step_*"):
+            if not path.is_dir():
+                continue
+            step = self._checkpoint_step_from_name(path.name)
+            if step is not None:
+                state_entries.append((step, path))
+
+        keep_steps = set(
+            sorted({step for step, _ in weight_entries + state_entries}, reverse=True)[
+                : self.checkpoint_max_to_keep
+            ]
+        )
+
+        for step, path in weight_entries:
+            if step not in keep_steps and path.exists():
+                path.unlink()
+                logger.info("[ckpt-prune] removed weights checkpoint %s", path)
+        for step, path in state_entries:
+            if step not in keep_steps and path.exists():
+                shutil.rmtree(path)
+                logger.info("[ckpt-prune] removed state checkpoint %s", path)
+
     def save_checkpoint(self):
         step_tag = f"step_{self.global_step:06d}"
+        ckpt_path = os.path.join(self.weights_dir, f"{step_tag}.pt")
+        state_path = os.path.join(self.state_dir, step_tag)
+        if (
+            self._last_checkpoint_step == self.global_step
+            and os.path.exists(ckpt_path)
+            and os.path.isdir(state_path)
+        ):
+            return {"weights_path": ckpt_path, "state_path": state_path}
 
         self.accelerator.wait_for_everyone()
-        ckpt_path = None
         if self.accelerator.is_main_process:
             ckpt_path = self._save_weights_checkpoint(step_tag=step_tag)
         self.accelerator.wait_for_everyone()
 
-        state_path = os.path.join(self.state_dir, step_tag)
         ensure_dir(state_path)
         self.accelerator.save_state(output_dir=state_path)
         if self.accelerator.is_main_process:
             self._save_trainer_state(state_path)
+        self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process:
+            self._prune_old_checkpoints()
+        self._last_checkpoint_step = self.global_step
         self.accelerator.wait_for_everyone()
 
         return {"weights_path": ckpt_path, "state_path": state_path}

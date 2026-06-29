@@ -4,6 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
+LIGHTWAM_ENV_BIN="${LIGHTWAM_ENV_BIN:-}"
+if [[ -n "${LIGHTWAM_ENV_BIN}" ]]; then
+  export PATH="${LIGHTWAM_ENV_BIN}:${PATH}"
+fi
 export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
 
@@ -19,6 +23,8 @@ RUN_TAG="${RUN_TAG:-${SUITE_NAME}_lightwam}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/runs/${RUN_TAG}/${RUN_ID}_lightwam}"
 WANDB_PROJECT="${WANDB_PROJECT:-light-wam}"
 WANDB_NAME="${WANDB_NAME:-${RUN_TAG}_${RUN_ID}}"
+WANDB_MODE="${WANDB_MODE:-offline}"
+WANDB_GROUP="${WANDB_GROUP:-null}"
 RESUME="${RESUME:-null}"
 
 DATASET_DIR="${DATASET_DIR:-}"
@@ -38,6 +44,7 @@ NUM_WORKERS="${NUM_WORKERS:-16}"
 EVAL_EVERY="${EVAL_EVERY:-0}"
 MAX_STEPS="${MAX_STEPS:-150000}"
 SAVE_EVERY="${SAVE_EVERY:-1000}"
+CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-2}"
 WARMUP_STEPS="${WARMUP_STEPS:-1000}"
 NUM_EPOCHS="${NUM_EPOCHS:-25}"
 
@@ -70,7 +77,27 @@ LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 LR_SCHEDULER_TYPE="${LR_SCHEDULER_TYPE:-cosine}"
 PARAMETER_REPORT_ENABLED="${PARAMETER_REPORT_ENABLED:-true}"
 MOT_CHECKPOINT_MIXED_ATTN="${MOT_CHECKPOINT_MIXED_ATTN:-False}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}"
+DISTRIBUTED_DEBUG_SYNC_TRAIN_STEP="${DISTRIBUTED_DEBUG_SYNC_TRAIN_STEP:-false}"
+DISTRIBUTED_CHUNKED_COLLECTIVES_ENABLED="${DISTRIBUTED_CHUNKED_COLLECTIVES_ENABLED:-false}"
+DISTRIBUTED_CHUNKED_COLLECTIVES_MAX_BYTES="${DISTRIBUTED_CHUNKED_COLLECTIVES_MAX_BYTES:-65536}"
+ACCELERATE_CONFIG_FILE="${ACCELERATE_CONFIG_FILE:-scripts/accelerate_configs/accelerate_zero1_ds.yaml}"
+
+export TORCHDYNAMO_DISABLE="${TORCHDYNAMO_DISABLE:-1}"
+export TORCH_COMPILE_DISABLE="${TORCH_COMPILE_DISABLE:-1}"
+export TORCHINDUCTOR_DISABLE="${TORCHINDUCTOR_DISABLE:-1}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# NCCL 2.26.2 on this Blackwell host hit cudaErrorIllegalAddress on >=128KB
+# collectives. The environment has been upgraded to NCCL 2.27.3, so the normal
+# default is to let NCCL choose protocols. Set NCCL_PROTO_DEFAULT=LL only as a
+# fallback for older/broken NCCL stacks.
+NCCL_PROTO_DEFAULT="${NCCL_PROTO_DEFAULT:-unset}"
+if [[ -n "${NCCL_PROTO+x}" ]]; then
+  export NCCL_PROTO
+elif [[ "${NCCL_PROTO_DEFAULT}" == "unset" ]]; then
+  unset NCCL_PROTO
+elif [[ -n "${NCCL_PROTO_DEFAULT}" ]]; then
+  export NCCL_PROTO="${NCCL_PROTO_DEFAULT}"
+fi
 
 DATASET_OVERRIDE_ARGS=()
 if [[ -n "${DATASET_DIRS}" ]]; then
@@ -95,15 +122,19 @@ echo "[launch] dataset_dir=${DATASET_DIR:-<config default>}"
 echo "[launch] dataset_dirs=${DATASET_DIRS:-<config default>}"
 echo "[launch] latent_cache_dir=${LATENT_CACHE_DIR:-<config default>}"
 echo "[launch] text_embed_cache_dir=${TEXT_EMBED_CACHE_DIR}"
-echo "[launch] wandb.project=${WANDB_PROJECT} wandb.name=${WANDB_NAME} wandb.mode=offline"
+echo "[launch] wandb.project=${WANDB_PROJECT} wandb.name=${WANDB_NAME} wandb.group=${WANDB_GROUP} wandb.mode=${WANDB_MODE}"
 echo "[launch] batch_size=${BATCH_SIZE} grad_acc=${GRAD_ACC} num_workers=${NUM_WORKERS} eval_every=${EVAL_EVERY}"
-echo "[launch] max_steps=${MAX_STEPS} save_every=${SAVE_EVERY} warmup_steps=${WARMUP_STEPS} num_epochs=${NUM_EPOCHS}"
+echo "[launch] max_steps=${MAX_STEPS} save_every=${SAVE_EVERY} checkpoint.max_to_keep=${CHECKPOINT_MAX_TO_KEEP} warmup_steps=${WARMUP_STEPS} num_epochs=${NUM_EPOCHS}"
 echo "[launch] learning_rate=${LEARNING_RATE} lr_scheduler_type=${LR_SCHEDULER_TYPE}"
 echo "[launch] model.loss.action_temporal_weighting.num_prefix_steps=${TEMPORAL_PREFIX_STEPS}"
 echo "[launch] model.state_fusion_action_expert_config.token_pooling_num_queries=${TOKEN_POOLING_NUM_QUERIES}"
+echo "[launch] distributed.chunked_collectives.enabled=${DISTRIBUTED_CHUNKED_COLLECTIVES_ENABLED} max_bytes=${DISTRIBUTED_CHUNKED_COLLECTIVES_MAX_BYTES}"
+echo "[launch] accelerate_config=${ACCELERATE_CONFIG_FILE}"
+echo "[launch] lightwam_env_bin=${LIGHTWAM_ENV_BIN:-<none>}"
+echo "[launch] NCCL_PROTO=${NCCL_PROTO:-<unset>}"
 
 CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch \
-  --config_file scripts/accelerate_configs/accelerate_zero1_ds.yaml \
+  --config_file "${ACCELERATE_CONFIG_FILE}" \
   --num_processes "${NUM_PROCESSES}" \
   --main_process_port "${MAIN_PROCESS_PORT}" \
   scripts/train.py \
@@ -113,7 +144,8 @@ CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch \
   "wandb.enabled=true" \
   "wandb.project=${WANDB_PROJECT}" \
   "wandb.name=${WANDB_NAME}" \
-  "wandb.mode=offline" \
+  "wandb.group=${WANDB_GROUP}" \
+  "wandb.mode=${WANDB_MODE}" \
   "batch_size=${BATCH_SIZE}" \
   "gradient_accumulation_steps=${GRAD_ACC}" \
   "num_workers=${NUM_WORKERS}" \
@@ -122,8 +154,12 @@ CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch \
   "lr_scheduler_type=${LR_SCHEDULER_TYPE}" \
   "max_steps=${MAX_STEPS}" \
   "save_every=${SAVE_EVERY}" \
+  "checkpoint.max_to_keep=${CHECKPOINT_MAX_TO_KEEP}" \
   "warmup_steps=${WARMUP_STEPS}" \
   "num_epochs=${NUM_EPOCHS}" \
+  "distributed.debug_sync_train_step=${DISTRIBUTED_DEBUG_SYNC_TRAIN_STEP}" \
+  "distributed.chunked_collectives.enabled=${DISTRIBUTED_CHUNKED_COLLECTIVES_ENABLED}" \
+  "distributed.chunked_collectives.max_bytes=${DISTRIBUTED_CHUNKED_COLLECTIVES_MAX_BYTES}" \
   "parameter_report.enabled=${PARAMETER_REPORT_ENABLED}" \
   "model.mot_checkpoint_mixed_attn=${MOT_CHECKPOINT_MIXED_ATTN}" \
   "model.loss.use_first_frame_residual_video_target=false" \

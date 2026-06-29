@@ -1,0 +1,14 @@
+# Python/runtime artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local logs
+*.log
+train.log
+
+# Local model/data/run artifacts
+/checkpoints/
+/data/
+/runs/
+/wandb/
