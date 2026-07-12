@@ -18,6 +18,7 @@ RUN_TAG="${RUN_TAG:-lightwam_robotwin_3cam384_1e-4}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/runs/${RUN_TAG}/${RUN_ID}_lightwam}"
 WANDB_PROJECT="${WANDB_PROJECT:-light-wam}"
 WANDB_NAME="${WANDB_NAME:-${RUN_TAG}_${RUN_ID}}"
+WANDB_MODE="${WANDB_MODE:-online}"
 RESUME="${RESUME:-null}"
 
 ROBOTWIN_TRAIN_DIR="${ROBOTWIN_TRAIN_DIR:-${REPO_ROOT}/data/robotwin2.0/robotwin2.0}"
@@ -33,7 +34,13 @@ CONCAT_MULTI_CAMERA="${CONCAT_MULTI_CAMERA:-robotwin}"
 NUM_OUTPUT_CAMERAS="${NUM_OUTPUT_CAMERAS:-3}"
 
 BATCH_SIZE="${BATCH_SIZE:-16}"
-GRAD_ACC="${GRAD_ACC:-2}"
+GRAD_ACC="${GRAD_ACC:-1}"
+TARGET_GLOBAL_BATCH_SIZE="${TARGET_GLOBAL_BATCH_SIZE:-64}"
+EFFECTIVE_GLOBAL_BATCH_SIZE=$((NUM_PROCESSES * BATCH_SIZE * GRAD_ACC))
+if [[ "${EFFECTIVE_GLOBAL_BATCH_SIZE}" -ne "${TARGET_GLOBAL_BATCH_SIZE}" ]]; then
+  echo "[launch] effective global batch ${EFFECTIVE_GLOBAL_BATCH_SIZE} does not match TARGET_GLOBAL_BATCH_SIZE=${TARGET_GLOBAL_BATCH_SIZE}" >&2
+  exit 2
+fi
 NUM_WORKERS="${NUM_WORKERS:-16}"
 EVAL_EVERY="${EVAL_EVERY:-0}"
 MAX_STEPS="${MAX_STEPS:-500000}"
@@ -79,7 +86,7 @@ echo "[launch] latent_cache_dir=${LATENT_CACHE_DIR}"
 echo "[launch] text_embed_cache_dir=${TEXT_EMBED_CACHE_DIR}"
 echo "[launch] output_dir=${OUTPUT_DIR}"
 echo "[launch] resume=${RESUME}"
-echo "[launch] wandb.project=${WANDB_PROJECT} wandb.name=${WANDB_NAME} wandb.mode=offline"
+echo "[launch] wandb.project=${WANDB_PROJECT} wandb.name=${WANDB_NAME} wandb.mode=${WANDB_MODE}"
 
 CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch \
   --config_file scripts/accelerate_configs/accelerate_zero1_ds.yaml \
@@ -92,7 +99,7 @@ CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch \
   "wandb.enabled=true" \
   "wandb.project=${WANDB_PROJECT}" \
   "wandb.name=${WANDB_NAME}" \
-  "wandb.mode=offline" \
+  "wandb.mode=${WANDB_MODE}" \
   "batch_size=${BATCH_SIZE}" \
   "gradient_accumulation_steps=${GRAD_ACC}" \
   "num_workers=${NUM_WORKERS}" \
