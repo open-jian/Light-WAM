@@ -57,13 +57,13 @@ model:
 data:
   train:
     dataset_dirs:
-      - ./data/rmbench/put_back_block_no_memory
+      - ./data/rmbench/tasks/put_back_block
     num_frames: 33
     val_set_proportion: 0.10
-    pretrained_norm_stats: ./data/rmbench/put_back_block_no_memory_dataset_stats.json
-    text_embedding_cache_dir: ./data/text_embeds_cache/rmbench_put_back_block_no_memory
+    pretrained_norm_stats: ./data/rmbench/tasks/put_back_block/dataset_stats_train.json
+    text_embedding_cache_dir: ./data/text_embeds_cache/rmbench
     use_latent_cache: true
-    latent_cache_dir: ./data/latent_cache_Wan2.1-T2V-1.3B/rmbench_put_back_block_no_memory_3cam384_sharded
+    latent_cache_dir: ./data/latent_cache_Wan2.1-T2V-1.3B/rmbench_tasks/put_back_block_3cam384_sharded
   val:
     dataset_dirs: ${data.train.dataset_dirs}
     num_frames: ${data.train.num_frames}
