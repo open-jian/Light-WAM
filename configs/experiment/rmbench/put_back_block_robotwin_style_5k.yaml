@@ -7,13 +7,13 @@ defaults:
 # A self-contained experiment profile. Keep schedule/data changes here so the
 # generic RM-Bench and RoboTwin launchers remain untouched.
 experiment:
-  name: rmbench_put_back_block_no_memory_libero_style_5k
+  name: rmbench_put_back_block_no_memory_robotwin_style_5k
   task_name: put_back_block
   policy_memory: none
-  evaluation_profile: sim_rmbench_put_back_block_libero_style_5k
+  evaluation_profile: sim_rmbench_put_back_block_robotwin_style_5k
   action_horizon: 32
-  trained_action_prefix: 8
-  evaluation_replan_steps: 10
+  trained_action_prefix: 24
+  evaluation_replan_steps: 24
 
 launcher:
   gpu_ids: [0, 1, 2, 3]
@@ -22,7 +22,7 @@ launcher:
   accelerate_config_file: ./scripts/accelerate_configs/accelerate_zero1_ds.yaml
   expected_global_batch_size: 32
 
-output_dir: ./runs/rmbench_no_memory/put_back_block/libero_style_5k/${now:%Y-%m-%d_%H-%M-%S}
+output_dir: ./runs/rmbench_no_memory/put_back_block/robotwin_style_5k/${now:%Y-%m-%d_%H-%M-%S}
 
 batch_size: 8
 num_workers: 8
@@ -42,7 +42,7 @@ weight_decay: 1.0e-2
 wandb:
   enabled: true
   project: light-wam-rmbench
-  name: put_back_block_no_memory_libero_style_5k_${now:%Y%m%d_%H%M%S}
+  name: put_back_block_no_memory_robotwin_style_5k_${now:%Y%m%d_%H%M%S}
   group: rmbench_put_back_block_no_memory
   mode: online
 
@@ -50,7 +50,7 @@ model:
   loss:
     action_temporal_weighting:
       enabled: true
-      num_prefix_steps: 8
+      num_prefix_steps: 24
       prefix_weight: 1.0
       tail_weight: 0.0
 
