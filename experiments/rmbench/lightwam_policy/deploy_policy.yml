@@ -1,0 +1,27 @@
+policy_name: lightwam_policy
+task_name: null
+task_config: demo_clean
+ckpt_setting: null
+checkpoint_path: null
+seed: 0
+instruction_type: unseen
+eval_num_episodes: 100
+
+sim_cfg_path: null
+sim_task: rmbench_no_memory_3cam_384_1e-4
+sim_cfg_name: sim_rmbench_no_memory.yaml
+use_training_run_config: true
+training_config_path: null
+mixed_precision: bf16
+device: cuda
+dataset_stats_path: null
+action_horizon: 32
+replan_steps: 24
+num_inference_steps: 10
+sigma_shift: null
+text_cfg_scale: 1.0
+negative_prompt: ""
+rand_device: cpu
+tiled: false
+timing_enabled: false
+skip_get_obs_within_replan: true

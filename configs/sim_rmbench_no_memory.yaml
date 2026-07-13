@@ -1,0 +1,46 @@
+# @package _global_
+
+defaults:
+  - train
+  - override /task: rmbench_no_memory_3cam_384_1e-4
+  - _self_
+
+ckpt: null
+gpu_id: 0
+
+model:
+  load_text_encoder: true
+  skip_dit_load_from_pretrain: true
+  action_dit_pretrained_path: null
+
+EVALUATION:
+  rmbench_root: /data2/jian/benchmark/RMBench/RMBench
+  policy_name: lightwam_policy
+  task_name: null
+  task_config: demo_clean
+  instruction_type: unseen
+  eval_num_episodes: 100
+  output_dir: ./runs/rmbench_no_memory/eval/${now:%Y%m%d_%H%M%S}
+  use_training_run_config: true
+  training_config_path: null
+
+  action_horizon: 32
+  replan_steps: 24
+  num_inference_steps: ${eval_num_inference_steps}
+  sigma_shift: null
+  text_cfg_scale: 1.0
+  negative_prompt: ""
+  rand_device: cpu
+  tiled: false
+  timing_enabled: false
+  skip_get_obs_within_replan: true
+
+  dataset_stats_path: ./data/rmbench/dataset_stats.json
+  device: cuda
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
