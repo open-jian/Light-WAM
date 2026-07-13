@@ -1,0 +1,74 @@
+# @package _global_
+
+defaults:
+  - override /task: rmbench_no_memory_3cam_384_1e-4
+  - _self_
+
+# A self-contained experiment profile. Keep schedule/data changes here so the
+# generic RM-Bench and RoboTwin launchers remain untouched.
+experiment:
+  name: rmbench_put_back_block_no_memory_libero_style_5k
+  task_name: put_back_block
+  policy_memory: none
+  evaluation_profile: sim_rmbench_put_back_block_libero_style_5k
+  action_horizon: 32
+  trained_action_prefix: 8
+  evaluation_replan_steps: 10
+
+launcher:
+  gpu_ids: [0, 1, 2, 3]
+  num_processes: 4
+  main_process_port: 29578
+  accelerate_config_file: ./scripts/accelerate_configs/accelerate_zero1_ds.yaml
+  expected_global_batch_size: 32
+
+output_dir: ./runs/rmbench_no_memory/put_back_block/libero_style_5k/${now:%Y-%m-%d_%H-%M-%S}
+
+batch_size: 8
+num_workers: 8
+gradient_accumulation_steps: 1
+
+learning_rate: 1.0e-4
+lr_scheduler_type: cosine
+warmup_steps: 250
+max_steps: 5000
+# max_steps is authoritative; keep epochs high enough that a small task cannot
+# terminate before the requested optimization budget.
+num_epochs: 100
+save_every: 1000
+eval_every: 500
+weight_decay: 1.0e-2
+
+wandb:
+  enabled: true
+  project: light-wam-rmbench
+  name: put_back_block_no_memory_libero_style_5k_${now:%Y%m%d_%H%M%S}
+  group: rmbench_put_back_block_no_memory
+  mode: online
+
+model:
+  loss:
+    action_temporal_weighting:
+      enabled: true
+      num_prefix_steps: 8
+      prefix_weight: 1.0
+      tail_weight: 0.0
+
+data:
+  train:
+    dataset_dirs:
+      - ./data/rmbench/put_back_block_no_memory
+    num_frames: 33
+    val_set_proportion: 0.10
+    pretrained_norm_stats: ./data/rmbench/put_back_block_no_memory_dataset_stats.json
+    text_embedding_cache_dir: ./data/text_embeds_cache/rmbench_put_back_block_no_memory
+    use_latent_cache: true
+    latent_cache_dir: ./data/latent_cache_Wan2.1-T2V-1.3B/rmbench_put_back_block_no_memory_3cam384_sharded
+  val:
+    dataset_dirs: ${data.train.dataset_dirs}
+    num_frames: ${data.train.num_frames}
+    val_set_proportion: ${data.train.val_set_proportion}
+    pretrained_norm_stats: ${data.train.pretrained_norm_stats}
+    text_embedding_cache_dir: ${data.train.text_embedding_cache_dir}
+    use_latent_cache: false
+    latent_cache_dir: null

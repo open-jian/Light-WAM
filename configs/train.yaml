@@ -5,6 +5,7 @@ defaults:
   - data: null
   - model: null
   - task: null
+  - experiment: null
 
 
 output_dir: ./runs/train/${now:%Y-%m-%d}_${now:%H-%M-%S}
