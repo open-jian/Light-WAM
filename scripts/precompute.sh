@@ -62,8 +62,14 @@ case "${TARGET}" in
     LATENT_CACHE_DIR="./data/latent_cache_Wan2.1-T2V-1.3B/robotwin_3cam384_sharded"
     TEXT_CACHE_DIR="./data/text_embeds_cache/robotwin"
     ;;
+  rmbench_no_memory)
+    TASK_NAME="rmbench_no_memory_3cam_384_1e-4"
+    DATASET_DIR="./data/rmbench/lerobot_no_memory"
+    LATENT_CACHE_DIR="./data/latent_cache_Wan2.1-T2V-1.3B/rmbench_no_memory_3cam384_sharded"
+    TEXT_CACHE_DIR="./data/text_embeds_cache/rmbench_no_memory"
+    ;;
   *)
-    echo "Unsupported TARGET=${TARGET}. Expected one of: libero_spatial, libero_object, libero_goal, libero_10, robotwin" >&2
+    echo "Unsupported TARGET=${TARGET}. Expected one of: libero_spatial, libero_object, libero_goal, libero_10, robotwin, rmbench_no_memory" >&2
     exit 1
     ;;
 esac
