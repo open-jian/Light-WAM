@@ -3,6 +3,7 @@ from pathlib import Path
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+from experiments.rmbench.eval_rmbench_single import _resolve_official_result_tag
 from experiments.rmbench.lightwam_policy import deploy_policy as rmbench_policy
 from experiments.rmbench.run_official_eval import _normalize_official_metrics
 from experiments.robotwin.lightwam_policy import deploy_policy as robotwin_policy
@@ -56,6 +57,22 @@ def test_rmbench_eval_config_is_no_memory_robotwin_protocol() -> None:
     assert cfg.EVALUATION.dataset_stats_path == "./data/rmbench/dataset_stats.json"
     assert cfg.data.train._target_.endswith("RobotVideoDataset")
     assert _forbidden_paths(resolved) == []
+
+
+def test_rmbench_official_result_tags_are_isolated_and_safe() -> None:
+    cfg = OmegaConf.create({"seed": 7, "EVALUATION": {"official_result_tag": None}})
+    assert _resolve_official_result_tag(cfg, "checkpoint") == "checkpoint_seed7"
+
+    cfg.EVALUATION.official_result_tag = "step_005000_seed7"
+    assert _resolve_official_result_tag(cfg, "checkpoint") == "step_005000_seed7"
+
+    cfg.EVALUATION.official_result_tag = "../escape"
+    try:
+        _resolve_official_result_tag(cfg, "checkpoint")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("path-like result tag should be rejected")
 
 
 def test_short_eval_metrics_survive_official_hardcoded_denominator() -> None:

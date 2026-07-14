@@ -28,6 +28,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 POLICY_NAME = "lightwam_policy"
 
 
+def _resolve_official_result_tag(cfg: DictConfig, ckpt_tag: str) -> str:
+    """Return a safe, per-evaluation directory component for official outputs."""
+    configured_tag = cfg.EVALUATION.get("official_result_tag")
+    tag = str(configured_tag).strip() if configured_tag is not None else f"{ckpt_tag}_seed{cfg.seed}"
+    if not tag or tag in {".", ".."} or Path(tag).name != tag:
+        raise ValueError(
+            "`EVALUATION.official_result_tag` must be a non-empty single directory name"
+        )
+    return tag
+
+
 def _new_result_directories(result_parent: Path, before: set[Path]) -> list[Path]:
     if not result_parent.is_dir():
         return []
@@ -50,6 +61,7 @@ def main(cfg: DictConfig) -> None:
     if not ckpt_path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     ckpt_tag = _resolve_ckpt_tag(ckpt_path)
+    result_tag = _resolve_official_result_tag(cfg, ckpt_tag)
 
     rmbench_root = _resolve_path(str(cfg.EVALUATION.rmbench_root), base=PROJECT_ROOT)
     if not (rmbench_root / "script" / "eval_policy.py").is_file():
@@ -73,7 +85,7 @@ def main(cfg: DictConfig) -> None:
     for key, value in (
         ("task_name", cfg.EVALUATION.task_name),
         ("task_config", cfg.EVALUATION.task_config),
-        ("ckpt_setting", ckpt_tag),
+        ("ckpt_setting", result_tag),
         ("checkpoint_path", str(ckpt_path)),
         ("seed", cfg.seed),
         ("policy_name", POLICY_NAME),
@@ -105,7 +117,7 @@ def main(cfg: DictConfig) -> None:
         / str(cfg.EVALUATION.task_name)
         / POLICY_NAME
         / str(cfg.EVALUATION.task_config)
-        / ckpt_tag
+        / result_tag
     )
     before = set(result_parent.iterdir()) if result_parent.is_dir() else set()
     command = [

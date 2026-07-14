@@ -21,6 +21,9 @@ EVALUATION:
   instruction_type: unseen
   eval_num_episodes: 100
   output_dir: ./runs/rmbench_no_memory/eval/${now:%Y%m%d_%H%M%S}
+  # Result-directory component passed to the official evaluator. Set this per
+  # concurrent job to avoid its second-resolution output-directory collision.
+  official_result_tag: null
   use_training_run_config: true
   training_config_path: null
 

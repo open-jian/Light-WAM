@@ -16,15 +16,16 @@ experiment:
   evaluation_replan_steps: 24
 
 launcher:
-  gpu_ids: [0, 1, 2, 3]
-  num_processes: 4
+  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  num_processes: 8
   main_process_port: 29578
   accelerate_config_file: ./scripts/accelerate_configs/accelerate_zero1_ds.yaml
   expected_global_batch_size: 32
 
 output_dir: ./runs/rmbench_no_memory/put_back_block/robotwin_style_5k/${now:%Y-%m-%d_%H-%M-%S}
 
-batch_size: 8
+# Preserve the approved effective global batch of 32 while using all 8 GPUs.
+batch_size: 4
 num_workers: 8
 gradient_accumulation_steps: 1
 
@@ -41,7 +42,7 @@ weight_decay: 1.0e-2
 
 wandb:
   enabled: true
-  project: light-wam-rmbench
+  project: light-wam-RMBench
   name: put_back_block_no_memory_robotwin_style_5k_${now:%Y%m%d_%H%M%S}
   group: rmbench_put_back_block_no_memory
   mode: online
