@@ -5,7 +5,10 @@ from omegaconf import OmegaConf
 
 from experiments.rmbench.eval_rmbench_single import _resolve_official_result_tag
 from experiments.rmbench.lightwam_policy import deploy_policy as rmbench_policy
-from experiments.rmbench.run_official_eval import _normalize_official_metrics
+from experiments.rmbench.run_official_eval import (
+    _compose_multi_view_frame,
+    _normalize_official_metrics,
+)
 from experiments.robotwin.lightwam_policy import deploy_policy as robotwin_policy
 
 
@@ -79,3 +82,24 @@ def test_short_eval_metrics_survive_official_hardcoded_denominator() -> None:
     successes, reward_sum = _normalize_official_metrics(2, 7.5, episode_limit=5)
     assert successes / 100 == 2 / 5
     assert reward_sum / 100 == 7.5 / 5
+
+
+def test_rmbench_multi_view_video_contains_all_four_camera_panels() -> None:
+    import numpy as np
+
+    observation = {
+        "third_view_rgb": np.full((240, 320, 3), (255, 0, 0), dtype=np.uint8),
+        "observation": {
+            "head_camera": {"rgb": np.full((240, 320, 3), (0, 255, 0), dtype=np.uint8)},
+            "left_camera": {"rgb": np.full((240, 320, 3), (0, 0, 255), dtype=np.uint8)},
+            "right_camera": {"rgb": np.full((240, 320, 3), (255, 255, 0), dtype=np.uint8)},
+        },
+    }
+    frame = _compose_multi_view_frame(observation)
+
+    assert frame.shape == (480, 640, 3)
+    assert frame.dtype == np.uint8
+    np.testing.assert_array_equal(frame[120, 160], (255, 0, 0))
+    np.testing.assert_array_equal(frame[120, 480], (0, 255, 0))
+    np.testing.assert_array_equal(frame[360, 160], (0, 0, 255))
+    np.testing.assert_array_equal(frame[360, 480], (255, 255, 0))

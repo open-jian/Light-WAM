@@ -108,6 +108,7 @@ def main(cfg: DictConfig) -> None:
         ("tiled", bool(cfg.EVALUATION.tiled)),
         ("timing_enabled", bool(cfg.EVALUATION.timing_enabled)),
         ("skip_get_obs_within_replan", bool(cfg.EVALUATION.skip_get_obs_within_replan)),
+        ("video_layout", cfg.EVALUATION.video_layout),
     ):
         _append_override(overrides, key, value)
 

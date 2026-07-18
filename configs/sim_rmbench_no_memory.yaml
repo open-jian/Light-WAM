@@ -37,6 +37,8 @@ EVALUATION:
   tiled: false
   timing_enabled: false
   skip_get_obs_within_replan: true
+  # Diagnostic recording only; policy inputs and task success checks are unchanged.
+  video_layout: multi_view
 
   dataset_stats_path: ./data/rmbench/dataset_stats.json
   device: cuda

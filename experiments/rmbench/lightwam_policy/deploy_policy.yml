@@ -25,3 +25,4 @@ rand_device: cpu
 tiled: false
 timing_enabled: false
 skip_get_obs_within_replan: true
+video_layout: multi_view
