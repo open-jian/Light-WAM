@@ -1,0 +1,74 @@
+# @package _global_
+
+defaults:
+  - override /task: rmbench_no_memory_3cam_384_1e-4
+  - _self_
+
+experiment:
+  name: rmbench_pbb_r460k_3k
+  task_name: put_back_block
+  policy_memory: none
+  evaluation_profile: sim_rmbench_put_back_block_robotwin_style_3k
+  action_horizon: 32
+  trained_action_prefix: 24
+  evaluation_replan_steps: 24
+
+launcher:
+  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  num_processes: 8
+  main_process_port: 29578
+  accelerate_config_file: ./scripts/accelerate_configs/accelerate_zero1_ds.yaml
+  expected_global_batch_size: 32
+
+# A .pt file initializes model weights only. Optimizer, scheduler, and the
+# fine-tuning step counter start fresh.
+resume: ./checkpoints/lightwam_release/lightwam_robotwin/checkpoints/weights/step_460000.pt
+output_dir: ./runs/rmbench_no_memory/put_back_block/r460k_3k/${now:%Y-%m-%d_%H-%M-%S}
+
+batch_size: 4
+num_workers: 8
+gradient_accumulation_steps: 1
+
+learning_rate: 1.0e-4
+lr_scheduler_type: cosine
+warmup_steps: 250
+max_steps: 3000
+num_epochs: 100
+save_every: 1000
+eval_every: 500
+weight_decay: 1.0e-2
+
+wandb:
+  enabled: true
+  project: light-wam-rmbench
+  # pbb=put_back_block, r460k=RoboTwin step 460000 initialization.
+  name: pbb-r460k-3k-s${seed}-${now:%m%d-%H%M}
+  group: pbb-r460k
+  mode: online
+
+model:
+  loss:
+    action_temporal_weighting:
+      enabled: true
+      num_prefix_steps: 24
+      prefix_weight: 1.0
+      tail_weight: 0.0
+
+data:
+  train:
+    dataset_dirs:
+      - ./data/rmbench/tasks/put_back_block
+    num_frames: 33
+    val_set_proportion: 0.10
+    pretrained_norm_stats: ./data/rmbench/tasks/put_back_block/dataset_stats_train.json
+    text_embedding_cache_dir: ./data/text_embeds_cache/rmbench
+    use_latent_cache: true
+    latent_cache_dir: ./data/latent_cache_Wan2.1-T2V-1.3B/rmbench_tasks/put_back_block_3cam384_sharded
+  val:
+    dataset_dirs: ${data.train.dataset_dirs}
+    num_frames: ${data.train.num_frames}
+    val_set_proportion: ${data.train.val_set_proportion}
+    pretrained_norm_stats: ${data.train.pretrained_norm_stats}
+    text_embedding_cache_dir: ${data.train.text_embedding_cache_dir}
+    use_latent_cache: false
+    latent_cache_dir: null

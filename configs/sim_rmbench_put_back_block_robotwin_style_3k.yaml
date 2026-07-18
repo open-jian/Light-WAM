@@ -1,0 +1,13 @@
+# @package _global_
+
+defaults:
+  - sim_rmbench_no_memory
+  - override /experiment: rmbench/put_back_block_robotwin_style_3k
+  - _self_
+
+EVALUATION:
+  task_name: put_back_block
+  output_dir: ./runs/rmbench_no_memory/put_back_block/r460k_3k/eval/${now:%Y%m%d_%H%M%S}
+  action_horizon: 32
+  replan_steps: 24
+  dataset_stats_path: ${data.train.pretrained_norm_stats}
