@@ -10,5 +10,7 @@ train.log
 # Local model/data/run artifacts
 /checkpoints/
 /data/
+/evaluate_results/
 /runs/
 /wandb/
+/robotwin_videos_latest
