@@ -6,6 +6,7 @@ ckpt_setting: null
 seed: 0
 instruction_type: unseen
 eval_num_episodes: 100
+eval_video_output_dir: null
 
 # Light-WAM policy args
 sim_cfg_path: null

@@ -123,6 +123,7 @@ def main(usr_args):
     if eval_num_episodes <= 0:
         raise ValueError(f"`eval_num_episodes` must be > 0, got: {eval_num_episodes}")
     eval_output_dir = usr_args.get("eval_output_dir")
+    eval_video_output_dir = usr_args.get("eval_video_output_dir")
     save_dir = None
     video_save_dir = None
     video_size = None
@@ -183,7 +184,10 @@ def main(usr_args):
     save_dir.mkdir(parents=True, exist_ok=True)
 
     if args["eval_video_log"]:
-        video_save_dir = save_dir
+        if eval_video_output_dir is not None and str(eval_video_output_dir).strip() != "":
+            video_save_dir = Path(str(eval_video_output_dir))
+        else:
+            video_save_dir = save_dir
         video_size = get_eval_video_size(args)
         video_save_dir.mkdir(parents=True, exist_ok=True)
         args["eval_video_save_dir"] = video_save_dir

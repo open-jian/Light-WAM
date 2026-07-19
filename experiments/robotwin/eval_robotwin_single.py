@@ -268,10 +268,15 @@ def main(cfg: DictConfig):
     output_dir = _resolve_path(str(cfg.EVALUATION.output_dir), base=PROJECT_ROOT)
     run_output_dir = output_dir
     run_output_dir.mkdir(parents=True, exist_ok=True)
+    video_output_dir = _resolve_path(
+        str(cfg.EVALUATION.video_output_dir), base=PROJECT_ROOT
+    )
+    video_output_dir.mkdir(parents=True, exist_ok=True)
     log_file = run_output_dir / (
         f"eval_{str(cfg.EVALUATION.task_name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     )
     robotwin_eval_base = run_output_dir / str(cfg.EVALUATION.task_name)
+    robotwin_video_base = video_output_dir / str(cfg.EVALUATION.task_name)
 
     sim_cfg_path = (PROJECT_ROOT / "configs" / "sim_robotwin.yaml").resolve()
     sim_task = HydraConfig.get().runtime.choices.get("task")
@@ -298,6 +303,7 @@ def main(cfg: DictConfig):
     _append_override(overrides, "sim_cfg_path", str(sim_cfg_path))
     _append_override(overrides, "sim_task", sim_task)
     _append_override(overrides, "eval_output_dir", str(robotwin_eval_base))
+    _append_override(overrides, "eval_video_output_dir", str(robotwin_video_base))
     if not bool(cfg.EVALUATION.get("use_training_run_config", False)):
         _append_override(overrides, "mixed_precision", cfg.mixed_precision)
     _append_override(overrides, "device", cfg.EVALUATION.device)

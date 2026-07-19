@@ -21,6 +21,7 @@ EVALUATION:
   instruction_type: unseen
   eval_num_episodes: 100
   output_dir: ./evaluate_results/robotwin/${hydra:runtime.choices.task}/${now:%Y%m%d_%H%M%S}
+  video_output_dir: ./Outputs/robotwin/${hydra:runtime.choices.task}/${now:%Y%m%d_%H%M%S}
   use_training_run_config: false
   training_config_path: null
 

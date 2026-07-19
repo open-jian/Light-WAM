@@ -28,6 +28,7 @@ if [[ "${OUTPUT_DIR_BASE}" == *"${CKPT_TAG}" ]]; then
 else
   OUTPUT_DIR="${OUTPUT_DIR_BASE}_${CKPT_TAG}"
 fi
+VIDEO_OUTPUT_DIR="${VIDEO_OUTPUT_DIR:-${REPO_ROOT}/Outputs/${RUN_TAG}_${CKPT_TAG}}"
 
 ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-${REPO_ROOT}/third_party/RoboTwin}"
 USE_TRAINING_RUN_CONFIG="${USE_TRAINING_RUN_CONFIG:-true}"
@@ -63,6 +64,7 @@ COMMON_ARGS=(
   "ckpt=${CKPT_ABS}"
   "EVALUATION.robotwin_root=${ROBOTWIN_ROOT}"
   "EVALUATION.output_dir=${OUTPUT_DIR}"
+  "EVALUATION.video_output_dir=${VIDEO_OUTPUT_DIR}"
   "EVALUATION.use_training_run_config=${USE_TRAINING_RUN_CONFIG}"
   "EVALUATION.task_config=${TASK_CONFIG}"
   "EVALUATION.eval_num_episodes=${EVAL_NUM_EPISODES}"

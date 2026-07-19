@@ -12,5 +12,6 @@ train.log
 /data/
 /evaluate_results/
 /runs/
+/Outputs/
 /wandb/
 /robotwin_videos_latest
