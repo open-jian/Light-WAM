@@ -52,6 +52,9 @@ def _canonical_data_train_meta(data_train_cfg: dict[str, Any] | None) -> dict[st
             "video_size",
             "camera_key",
             "concat_multi_camera",
+            "history_enabled",
+            "history_max_size",
+            "history_raw_stride",
         ],
     )
 

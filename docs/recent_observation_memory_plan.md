@@ -17,7 +17,8 @@
 - episode 开头历史不足时左侧 padding，并生成 `history_valid_mask`；不要重复第一帧。
 - 同一 batch 使用相同 `H`；多卡时由 rank 0 采样并 broadcast。
 - 默认 4 卡训练改为每卡 batch 4、梯度累积 4，global batch 仍为 64；`rmbench_no_memory` 保持 16×1。
-- 优先预计算/缓存独立 `T=1` history latent，避免训练时重复跑 VAE。
+- 每个采样点的 cache 保留原来的 current+future `video_latents`，并额外存满最近 12 个 history latent 和 `history_valid_mask`。
+- 每个历史槽复用对应早期采样点 main cache 的首 latent；该首 latent 与同一原图独立 `T=1` VAE 编码严格等价。训练时随机取最近 `H=4~12` 个，不再在线运行 VAE。
 
 ### 2. 拼接与两类时间
 

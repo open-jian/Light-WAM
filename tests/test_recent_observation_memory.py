@@ -11,6 +11,10 @@ from lightwam.models.wan22.lightwam import LightWAM
 from lightwam.models.wan22.wan_video_dit import WanVideoDiT
 from lightwam.trainer import Wan22Trainer
 from experiments.robotwin.lightwam_policy.deploy_policy import WorldActionRobotWinPolicy
+from scripts.precompute_video_latents import (
+    _build_history_from_episode_main_latents,
+    _encode_independent_history_latents,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,38 +77,120 @@ def test_processor_splits_fixed_history_candidates_before_video_clip():
     assert current_is_pad.tolist() == [False, False, True]
 
 
-def test_cached_history_never_crosses_episode_and_does_not_repeat_first_frame():
+def test_video_only_precompute_returns_main_and_max_history():
     dataset = object.__new__(RobotVideoDataset)
     dataset.history_enabled = True
     dataset.history_max_size = 3
-    dataset.history_frame_offsets = [-12, -8, -4]
-    dataset.lerobot_dataset = type(
-        "FakeBaseDataset",
-        (),
-        {
-            "global_sample_stride": 1,
-            "episode_data_index": {
-                "from": torch.tensor([5]),
-                "to": torch.tensor([20]),
-            },
+    dataset.num_frames = 3
+    dataset.video_only = True
+    dataset.use_latent_cache = False
+
+    class FakeProcessor:
+        @staticmethod
+        def _build_pixel_values_from_images_impl(sample, expected_num_obs_steps):
+            assert expected_num_obs_steps == 6
+            return sample["images"]["image"].unsqueeze(0)
+
+    dataset.processor = FakeProcessor()
+    def finalize(*, video, image_is_pad, temporal_indices=None):
+        if temporal_indices is None:
+            temporal_indices = [0, 1, 2]
+        return (
+            video[0, temporal_indices].permute(1, 0, 2, 3).contiguous(),
+            image_is_pad[temporal_indices],
+        )
+
+    dataset._finalize_video_tensor = finalize
+    sample = {
+        "images": {
+            "image": torch.arange(18, dtype=torch.float32).reshape(6, 3, 1, 1),
         },
-    )()
-    loaded_indices = []
+        "image_is_pad": torch.tensor([True, False, False, False, False, True]),
+    }
 
-    def load_cached(sample_idx):
-        loaded_indices.append(sample_idx)
-        return torch.full((1, 3, 1, 1), float(sample_idx))
+    video, history, valid = dataset._build_video_and_history_for_cache(sample)
 
-    dataset._load_cached_video_latents = load_cached
-    history, valid = dataset._load_cached_history_latents(
-        sample_idx=10,
-        history_valid_mask=torch.ones(3, dtype=torch.bool),
-        reference_latents=torch.zeros(1, 3, 1, 1),
+    assert valid.tolist() == [False, True, True]
+    assert history[:, 0].eq(0).all()
+    assert video.shape == (3, 3, 1, 1)
+    assert video[:, 0, 0, 0].tolist() == [9.0, 10.0, 11.0]
+
+
+def test_memory_cache_entry_requires_fixed_history_latents_and_mask():
+    dataset = object.__new__(RobotVideoDataset)
+    dataset.history_enabled = True
+    dataset.history_max_size = 3
+    entry = dataset._validate_cached_latent_entry(
+        {
+            "video_latents": torch.zeros(16, 3, 2, 2),
+            "history_video_latents": torch.ones(16, 3, 2, 2),
+            "history_valid_mask": torch.tensor([False, True, True]),
+        },
+        "fake.pt",
     )
 
-    assert loaded_indices == [6]
-    assert valid.tolist() == [False, False, True]
-    assert history[:, :, 0, 0].tolist() == [[0.0, 0.0, 6.0]]
+    assert entry["video_latents"].shape == (16, 3, 2, 2)
+    assert entry["history_video_latents"].shape == (16, 3, 2, 2)
+    assert entry["history_valid_mask"].tolist() == [False, True, True]
+
+
+def test_history_cache_encoder_uses_independent_t1_inputs_and_zeroes_padding():
+    calls = []
+
+    class FakeModel:
+        device = torch.device("cpu")
+        torch_dtype = torch.float32
+
+        @staticmethod
+        def _encode_video_latents(video, tiled):
+            assert tiled is False
+            assert video.shape[2] == 1
+            calls.append(video[:, 0, 0, 0, 0].tolist())
+            return video[:, :1]
+
+    history_video = torch.zeros(1, 3, 3, 1, 1)
+    history_video[0, 0, :, 0, 0] = torch.tensor([1.0, 2.0, 3.0])
+    history = _encode_independent_history_latents(
+        model=FakeModel(),
+        history_video=history_video,
+        history_valid_mask=torch.tensor([[False, True, True]]),
+        tiled=False,
+        cache_dtype=torch.float32,
+        encode_batch_size=2,
+    )
+
+    assert calls == [[1.0, 2.0], [3.0]]
+    assert history.shape == (1, 1, 3, 1, 1)
+    assert history.flatten().tolist() == [0.0, 2.0, 3.0]
+
+
+def test_episode_cache_reuses_earlier_samples_first_latent_for_history():
+    video_latents = torch.zeros(6, 1, 3, 1, 1)
+    video_latents[:, 0, 0, 0, 0] = torch.arange(6, dtype=torch.float32)
+    history, valid = _build_history_from_episode_main_latents(
+        video_latents=video_latents,
+        sample_indices=list(range(10, 16)),
+        episode_sample_start=10,
+        episode_sample_end=16,
+        history_frame_offsets=[-4, -2],
+    )
+
+    assert valid.tolist() == [
+        [False, False],
+        [False, False],
+        [False, True],
+        [False, True],
+        [True, True],
+        [True, True],
+    ]
+    assert history[:, 0, :, 0, 0].tolist() == [
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, 1.0],
+        [0.0, 2.0],
+        [1.0, 3.0],
+    ]
 
 
 def test_mixed_resolution_rope_aligns_libero_history_to_current_grid():
