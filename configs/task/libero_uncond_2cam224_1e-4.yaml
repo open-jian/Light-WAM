@@ -24,7 +24,7 @@ memory_monitor:
 
 wandb:
   project: LIBERO-Obj
-  name: raw-frame-as-mem-${now:%m-%d-%H-%M-%S}
+  name: raw-frame-as-mem_${now:%Y-%m-%d_%H-%M-%S}
 
 # scheduler
 lr_scheduler_type: "cosine"

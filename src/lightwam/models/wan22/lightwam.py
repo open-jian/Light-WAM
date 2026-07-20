@@ -900,8 +900,16 @@ class LightWAM(torch.nn.Module):
     ) -> None:
         if not self.memory_gradient_monitoring_enabled or not self.training:
             return
-        if not history_tokens.requires_grad or not main_tokens.requires_grad:
-            return
+
+        # The patch embedding is frozen in the normal Light-WAM setup, while
+        # the cached latents are plain inputs.  Consequently these boundary
+        # tensors do not require gradients even though trainable LoRA/adapters
+        # downstream do.  Make them gradient leaves solely for diagnostics so
+        # the hooks below can observe how strongly each branch uses them.
+        if not history_tokens.requires_grad:
+            history_tokens.requires_grad_(True)
+        if not main_tokens.requires_grad:
+            main_tokens.requires_grad_(True)
 
         branch = str(branch)
         batch_size, history_frames = history_valid_mask.shape

@@ -381,6 +381,31 @@ def test_future_output_backpropagates_to_old_history_without_leaking_back_to_cur
     assert not torch.equal(weight_before, dit.patch_embedding.weight.detach())
 
 
+def test_memory_gradient_monitor_enables_frozen_input_boundary_gradients():
+    model = object.__new__(LightWAM)
+    torch.nn.Module.__init__(model)
+    model.set_memory_gradient_monitoring(True)
+    model.train()
+
+    history_tokens = torch.randn(1, 2, 4)
+    main_tokens = torch.randn(1, 3, 4)
+    model._register_memory_gradient_hooks(
+        branch="video",
+        history_tokens=history_tokens,
+        main_tokens=main_tokens,
+        history_valid_mask=torch.ones(1, 2, dtype=torch.bool),
+        history_tokens_per_frame=1,
+        main_tokens_per_frame=1,
+    )
+
+    assert history_tokens.requires_grad
+    assert main_tokens.requires_grad
+    torch.cat([history_tokens, main_tokens], dim=1).square().mean().backward()
+    stats = model.pop_memory_gradient_stats()
+    assert "video/history_grad_rms" in stats
+    assert "video/current_grad_rms" in stats
+
+
 def test_shuffled_memory_probe_rolls_history_and_mask_together():
     sample = {
         "video": torch.tensor([[10.0], [20.0], [30.0]]),
