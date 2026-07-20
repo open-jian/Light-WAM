@@ -898,7 +898,12 @@ class LightWAM(torch.nn.Module):
         history_tokens_per_frame: int,
         main_tokens_per_frame: int,
     ) -> None:
-        if not self.memory_gradient_monitoring_enabled or not self.training:
+        # Adapter training intentionally leaves the top-level LightWAM module
+        # in eval mode while putting the video expert in train mode.  Treat the
+        # model as inference-only only when both levels are in eval mode.
+        if not self.memory_gradient_monitoring_enabled or (
+            not self.training and not self.video_expert.training
+        ):
             return
 
         # The patch embedding is frozen in the normal Light-WAM setup, while

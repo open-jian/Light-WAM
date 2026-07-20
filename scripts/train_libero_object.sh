@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_DATE="${RUN_DATE:-$(date +%Y-%m-%d_%H-%M-%S)}"
+RUN_DATE="${RUN_DATE:-$(TZ=America/Chicago date +%Y-%m-%d_%H-%M-%S)}"
 SUITE_NAME="${SUITE_NAME:-libero_object}" \
 TASK_NAME="${TASK_NAME:-libero_uncond_2cam224_1e-4}" \
 RUN_TAG="${RUN_TAG:-raw-frame-as-mem}" \

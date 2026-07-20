@@ -384,8 +384,11 @@ def test_future_output_backpropagates_to_old_history_without_leaking_back_to_cur
 def test_memory_gradient_monitor_enables_frozen_input_boundary_gradients():
     model = object.__new__(LightWAM)
     torch.nn.Module.__init__(model)
+    model.video_expert = torch.nn.Identity()
     model.set_memory_gradient_monitoring(True)
-    model.train()
+    # Adapter training leaves the parent in eval while the video expert trains.
+    model.eval()
+    model.video_expert.train()
 
     history_tokens = torch.randn(1, 2, 4)
     main_tokens = torch.randn(1, 3, 4)
