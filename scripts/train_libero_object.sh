@@ -13,4 +13,5 @@ LATENT_CACHE_DIR="${LATENT_CACHE_DIR:-./data/latent_cache_Wan2.1-T2V-1.3B/libero
 LEARNING_RATE="${LEARNING_RATE:-1e-4}" \
 MAX_STEPS="${MAX_STEPS:-12500}" \
 SAVE_EVERY="${SAVE_EVERY:-2500}" \
+CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-null}" \
 bash "${SCRIPT_DIR}/train_libero_core.sh" "$@"
