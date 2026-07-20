@@ -39,14 +39,16 @@ def test_rmbench_no_memory_config_reuses_robotwin_contract() -> None:
     ]
     assert cfg.model.loss.action_temporal_weighting.enabled is False
     for key in (
-        "batch_size",
         "learning_rate",
         "lr_scheduler_type",
         "num_epochs",
-        "gradient_accumulation_steps",
         "weight_decay",
     ):
         assert cfg[key] == robotwin[key]
+    # The memory-enabled RoboTwin task lowers per-device batch and compensates
+    # with accumulation; the no-memory task keeps its faster 16x1 schedule.
+    assert (cfg.batch_size, cfg.gradient_accumulation_steps) == (16, 1)
+    assert (robotwin.batch_size, robotwin.gradient_accumulation_steps) == (4, 4)
     for key in (
         "num_frames",
         "global_sample_stride",

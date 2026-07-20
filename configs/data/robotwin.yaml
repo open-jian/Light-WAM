@@ -31,6 +31,9 @@ train:
   pretrained_norm_stats: ./data/robotwin2.0/dataset_stats.json
   skip_padding_as_possible: false
   concat_multi_camera: "robotwin"
+  history_enabled: ${model.history_memory.enabled}
+  history_max_size: ${model.history_memory.max_size}
+  history_raw_stride: ${model.history_memory.raw_stride}
   use_latent_cache: false
   latent_cache_dir: null
   processor:
@@ -40,6 +43,7 @@ train:
     num_output_cameras: 3
     action_output_dim: 14
     proprio_output_dim: 14
+    history_num_frames: ${data.train.history_max_size}
 
     # action & state normalization
     action_state_transforms: null
@@ -97,6 +101,9 @@ val:
   pretrained_norm_stats: ./data/robotwin2.0/dataset_stats.json
   skip_padding_as_possible: false
   concat_multi_camera: "robotwin"
+  history_enabled: ${model.history_memory.enabled}
+  history_max_size: ${model.history_memory.max_size}
+  history_raw_stride: ${model.history_memory.raw_stride}
   use_latent_cache: false
   latent_cache_dir: null
   processor:
@@ -106,6 +113,7 @@ val:
     num_output_cameras: 3
     action_output_dim: 14
     proprio_output_dim: 14
+    history_num_frames: ${data.val.history_max_size}
 
     # action & state normalization
     action_state_transforms: null

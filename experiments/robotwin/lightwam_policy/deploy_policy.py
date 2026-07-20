@@ -243,6 +243,15 @@ class WorldActionRobotWinPolicy:
         self.normalize_transform = Normalize(args={"mean": 0.5, "std": 0.5})
 
         self.pending_actions: deque[np.ndarray] = deque()
+        self.history_enabled = bool(getattr(self.model, "history_enabled", False))
+        self.history_max_size = int(getattr(self.model, "history_max_size", 0))
+        self.history_raw_stride = int(getattr(self.model, "history_raw_stride", 1))
+        if self.history_enabled and self.replan_steps % self.history_raw_stride != 0:
+            raise ValueError(
+                "History-enabled RobotWin inference requires `replan_steps` to be divisible by "
+                f"history stride {self.history_raw_stride}, got {self.replan_steps}."
+            )
+        self.recent_observations: deque[torch.Tensor] = deque(maxlen=self.history_max_size)
         self.episode_count = 0
         self.step_count = 0
         self._timing_rollout = {"infer_s": 0.0, "sim_s": 0.0}
@@ -332,8 +341,14 @@ class WorldActionRobotWinPolicy:
             )
         return video.to(device=self.model.device, dtype=self.model.torch_dtype)
 
-    def _infer_action_chunk(self, observation: Dict[str, Any], instruction: str) -> np.ndarray:
-        image_tensor = self._build_robotwin_image_tensor(observation)
+    def _infer_action_chunk(
+        self,
+        observation: Dict[str, Any],
+        instruction: str,
+        image_tensor: Optional[torch.Tensor] = None,
+    ) -> np.ndarray:
+        if image_tensor is None:
+            image_tensor = self._build_robotwin_image_tensor(observation)
         state_vector = np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
         proprio = self._normalize_state(state_vector)
 
@@ -351,6 +366,13 @@ class WorldActionRobotWinPolicy:
             "rand_device": self.rand_device,
             "tiled": self.tiled,
         }
+        if self.history_enabled:
+            if self.recent_observations:
+                infer_kwargs["history_images"] = torch.stack(
+                    list(self.recent_observations), dim=0
+                )
+            else:
+                infer_kwargs["history_images"] = None
         if "num_video_frames" in inspect.signature(self.model.infer_action).parameters:
             infer_kwargs["num_video_frames"] = int(self._num_video_frames)
         infer_t0 = time.perf_counter() if self.timing_enabled else 0.0
@@ -363,24 +385,64 @@ class WorldActionRobotWinPolicy:
         action_chunk = self._denormalize_action(action_tensor)[0]  # [T, D]
         return action_chunk
 
-    def _fill_action_queue(self, observation: Dict[str, Any], instruction: str) -> None:
-        action_chunk = self._infer_action_chunk(observation=observation, instruction=instruction)
+    def _fill_action_queue(
+        self,
+        observation: Dict[str, Any],
+        instruction: str,
+        image_tensor: Optional[torch.Tensor] = None,
+    ) -> None:
+        action_chunk = self._infer_action_chunk(
+            observation=observation,
+            instruction=instruction,
+            image_tensor=image_tensor,
+        )
         n_exec = min(self.replan_steps, action_chunk.shape[0])
         for i in range(n_exec):
             self.pending_actions.append(np.asarray(action_chunk[i], dtype=np.float32))
 
     def should_request_observation(self) -> bool:
-        return not self.pending_actions
+        return (not self.pending_actions) or (
+            self.history_enabled and self.step_count % self.history_raw_stride == 0
+        )
+
+    def _remember_observation(self, image_tensor: torch.Tensor) -> None:
+        if not self.history_enabled:
+            return
+        if image_tensor.ndim != 4 or image_tensor.shape[0] != 1:
+            raise ValueError(
+                f"Expected one processed observation [1,3,H,W], got {tuple(image_tensor.shape)}."
+            )
+        # Store only real normalized observations.  CPU storage avoids retaining
+        # rollout-sized GPU tensors; infer_action moves the selected window back.
+        self.recent_observations.append(
+            image_tensor[0].detach().to(device="cpu", dtype=torch.float32).clone()
+        )
 
     def step(self, task_env, observation: Optional[Dict[str, Any]]) -> None:
-        if not self.pending_actions:
+        needs_replan = not self.pending_actions
+        needs_memory_sample = (
+            self.history_enabled and self.step_count % self.history_raw_stride == 0
+        )
+        if needs_replan or needs_memory_sample:
             if observation is None:
                 raise ValueError(
-                    "Observation is required when action queue is empty "
-                    "(replan step for Light-WAM)."
+                    "Observation is required on Light-WAM replan/history sampling steps."
                 )
+            image_tensor = self._build_robotwin_image_tensor(observation)
+
+        if needs_replan:
             instruction = task_env.get_instruction()
-            self._fill_action_queue(observation=observation, instruction=instruction)
+            self._fill_action_queue(
+                observation=observation,
+                instruction=instruction,
+                image_tensor=image_tensor,
+            )
+            # The current observation is not part of its own history.  Append it
+            # only after action inference has consumed the earlier deque.
+            if self.pending_actions:
+                self._remember_observation(image_tensor)
+        elif needs_memory_sample:
+            self._remember_observation(image_tensor)
 
         if not self.pending_actions:
             logger.warning("No action generated; skip current eval step.")
@@ -405,6 +467,7 @@ class WorldActionRobotWinPolicy:
 
     def reset(self) -> None:
         self.pending_actions.clear()
+        self.recent_observations.clear()
         self.episode_count += 1
         self.step_count = 0
         self.reset_timing_rollout()

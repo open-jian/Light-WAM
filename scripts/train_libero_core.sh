@@ -38,8 +38,8 @@ VIDEO_SIZE="${VIDEO_SIZE:-[224,448]}"
 CONCAT_MULTI_CAMERA="${CONCAT_MULTI_CAMERA:-horizontal}"
 NUM_OUTPUT_CAMERAS="${NUM_OUTPUT_CAMERAS:-2}"
 
-BATCH_SIZE="${BATCH_SIZE:-16}"
-GRAD_ACC="${GRAD_ACC:-1}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GRAD_ACC="${GRAD_ACC:-4}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 EVAL_EVERY="${EVAL_EVERY:-0}"
 MAX_STEPS="${MAX_STEPS:-150000}"
@@ -72,6 +72,10 @@ TEMPORAL_WEIGHTING_ENABLED="${TEMPORAL_WEIGHTING_ENABLED:-true}"
 TEMPORAL_PREFIX_STEPS="${TEMPORAL_PREFIX_STEPS:-8}"
 TEMPORAL_PREFIX_WEIGHT="${TEMPORAL_PREFIX_WEIGHT:-1.0}"
 TEMPORAL_TAIL_WEIGHT="${TEMPORAL_TAIL_WEIGHT:-0.0}"
+
+MEMORY_MONITOR_ENABLED="${MEMORY_MONITOR_ENABLED:-true}"
+MEMORY_SHUFFLED_PROBE_EVERY="${MEMORY_SHUFFLED_PROBE_EVERY:-500}"
+MEMORY_PROBE_BATCH_SIZE="${MEMORY_PROBE_BATCH_SIZE:-2}"
 
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 LR_SCHEDULER_TYPE="${LR_SCHEDULER_TYPE:-cosine}"
@@ -127,6 +131,7 @@ echo "[launch] batch_size=${BATCH_SIZE} grad_acc=${GRAD_ACC} num_workers=${NUM_W
 echo "[launch] max_steps=${MAX_STEPS} save_every=${SAVE_EVERY} checkpoint.max_to_keep=${CHECKPOINT_MAX_TO_KEEP} warmup_steps=${WARMUP_STEPS} num_epochs=${NUM_EPOCHS}"
 echo "[launch] learning_rate=${LEARNING_RATE} lr_scheduler_type=${LR_SCHEDULER_TYPE}"
 echo "[launch] model.loss.action_temporal_weighting.num_prefix_steps=${TEMPORAL_PREFIX_STEPS}"
+echo "[launch] memory_monitor.enabled=${MEMORY_MONITOR_ENABLED} shuffled_probe_every=${MEMORY_SHUFFLED_PROBE_EVERY} probe_batch_size=${MEMORY_PROBE_BATCH_SIZE}"
 echo "[launch] model.state_fusion_action_expert_config.token_pooling_num_queries=${TOKEN_POOLING_NUM_QUERIES}"
 echo "[launch] distributed.chunked_collectives.enabled=${DISTRIBUTED_CHUNKED_COLLECTIVES_ENABLED} max_bytes=${DISTRIBUTED_CHUNKED_COLLECTIVES_MAX_BYTES}"
 echo "[launch] accelerate_config=${ACCELERATE_CONFIG_FILE}"
@@ -167,6 +172,9 @@ CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch \
   "model.loss.action_temporal_weighting.num_prefix_steps=${TEMPORAL_PREFIX_STEPS}" \
   "model.loss.action_temporal_weighting.prefix_weight=${TEMPORAL_PREFIX_WEIGHT}" \
   "model.loss.action_temporal_weighting.tail_weight=${TEMPORAL_TAIL_WEIGHT}" \
+  "memory_monitor.enabled=${MEMORY_MONITOR_ENABLED}" \
+  "memory_monitor.shuffled_probe_every=${MEMORY_SHUFFLED_PROBE_EVERY}" \
+  "memory_monitor.probe_batch_size=${MEMORY_PROBE_BATCH_SIZE}" \
   "model.wam_adapter.use_wam_adapter=${USE_WAM_ADAPTER}" \
   "model.wam_adapter.freeze_backbone=${FREEZE_BACKBONE}" \
   "model.wam_adapter.remove_original_action_expert=${REMOVE_ORIGINAL_ACTION_EXPERT}" \

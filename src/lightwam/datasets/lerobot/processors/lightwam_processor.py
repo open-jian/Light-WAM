@@ -40,12 +40,16 @@ class LightWAMProcessor(BaseProcessor):
 
         tokenizer: Optional[Any] = None,
         delta_action_dim_mask: Optional[Dict[str, List[bool]]] = None,
+        history_num_frames: int = 0,
     ):
         self.shape_meta = shape_meta
         self.num_obs_steps = num_obs_steps
         self.num_output_cameras = num_output_cameras
         self.action_output_dim = action_output_dim
         self.proprio_output_dim = proprio_output_dim
+        self.history_num_frames = int(history_num_frames)
+        if self.history_num_frames < 0:
+            raise ValueError(f"`history_num_frames` must be non-negative, got {self.history_num_frames}.")
 
         self.drop_high_level_prob = drop_high_level_prob
         self.use_zh_instruction = use_zh_instruction
@@ -238,8 +242,33 @@ class LightWAMProcessor(BaseProcessor):
         """
         return self._build_pixel_values_from_images_impl(
             data,
-            expected_num_obs_steps=self.num_obs_steps,
+            expected_num_obs_steps=self.num_obs_steps + self.history_num_frames,
         )
+
+    def _split_history_from_image_data(
+        self,
+        pixel_values: torch.Tensor | None,
+        image_is_pad: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+        image_is_pad = torch.as_tensor(image_is_pad, dtype=torch.bool)
+        expected_total = self.history_num_frames + self.num_obs_steps
+        if image_is_pad.ndim != 1 or int(image_is_pad.shape[0]) != expected_total:
+            raise ValueError(
+                "Combined image padding mask must contain history plus the normal video clip, "
+                f"got {tuple(image_is_pad.shape)} vs expected ({expected_total},)."
+            )
+        history_is_pad = image_is_pad[: self.history_num_frames].contiguous()
+        current_image_is_pad = image_is_pad[self.history_num_frames :].contiguous()
+        if pixel_values is None:
+            return None, None, history_is_pad, current_image_is_pad
+        if pixel_values.ndim != 5 or int(pixel_values.shape[1]) != expected_total:
+            raise ValueError(
+                "Combined pixel values must be [N,T,C,H,W] with history plus current clip, "
+                f"got {tuple(pixel_values.shape)}."
+            )
+        history_pixel_values = pixel_values[:, : self.history_num_frames].contiguous()
+        current_pixel_values = pixel_values[:, self.history_num_frames :].contiguous()
+        return history_pixel_values, current_pixel_values, history_is_pad, current_image_is_pad
 
     def build_pixel_values_from_episode_images(self, data: Dict[str, Any]) -> torch.Tensor:
         """Apply the same per-frame camera transforms to a full episode tensor.
@@ -282,10 +311,17 @@ class LightWAMProcessor(BaseProcessor):
         sample = {}
         # 1. instruction
         sample["instruction"] = self.augment_instruction(data)
-        sample["image_is_pad"] = data["image_is_pad"]
+        combined_image_is_pad = data["image_is_pad"]
 
         # 2. image
-        sample["pixel_values"] = self.build_pixel_values_from_images(data)
+        combined_pixel_values = self.build_pixel_values_from_images(data)
+        (
+            sample["history_pixel_values"],
+            sample["pixel_values"],
+            history_is_pad,
+            sample["image_is_pad"],
+        ) = self._split_history_from_image_data(combined_pixel_values, combined_image_is_pad)
+        sample["history_valid_mask"] = ~history_is_pad
 
         # Copy action before transform for open-loop evaluation, 
         # disabled for training dataset as it may cause collating key problem.
@@ -334,7 +370,11 @@ class LightWAMProcessor(BaseProcessor):
         """
         sample = {}
         sample["instruction"] = self.augment_instruction(data)
-        sample["image_is_pad"] = data["image_is_pad"]
+        _, _, history_is_pad, sample["image_is_pad"] = self._split_history_from_image_data(
+            None,
+            data["image_is_pad"],
+        )
+        sample["history_valid_mask"] = ~history_is_pad
 
         if not self.is_train and "action" in data:
             sample["gt_action"] = deepcopy(data["action"])
