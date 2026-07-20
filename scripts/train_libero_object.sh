@@ -11,7 +11,8 @@ MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29578}" \
 DATASET_DIR="${DATASET_DIR:-./data/libero_mujoco3.3.2/libero_object_no_noops_lerobot}" \
 LATENT_CACHE_DIR="${LATENT_CACHE_DIR:-./data/latent_cache_Wan2.1-T2V-1.3B/libero_object_2cam224}" \
 LEARNING_RATE="${LEARNING_RATE:-1e-4}" \
-MAX_STEPS="${MAX_STEPS:-12500}" \
-SAVE_EVERY="${SAVE_EVERY:-2500}" \
+MAX_STEPS="${MAX_STEPS:-5000}" \
+SAVE_EVERY="${SAVE_EVERY:-1000}" \
+WARMUP_STEPS="${WARMUP_STEPS:-1000}" \
 CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-null}" \
 bash "${SCRIPT_DIR}/train_libero_core.sh" "$@"
