@@ -28,23 +28,31 @@ def _project_path(value: object) -> Path:
 
 def _missing_inputs(cfg: DictConfig) -> list[str]:
     missing: list[str] = []
-    for dataset_dir in cfg.data.train.dataset_dirs:
-        path = _project_path(dataset_dir)
-        if not path.is_dir():
-            missing.append(f"converted task dataset directory: {path}")
+    for split in ("train", "val"):
+        split_cfg = cfg.data.get(split)
+        if split_cfg is None:
+            missing.append(f"data.{split} configuration")
+            continue
 
-    stats_path = _project_path(cfg.data.train.pretrained_norm_stats)
-    if not stats_path.is_file():
-        missing.append(f"task normalization stats file: {stats_path}")
+        for dataset_dir in split_cfg.dataset_dirs:
+            path = _project_path(dataset_dir)
+            if not path.is_dir():
+                missing.append(f"{split} task dataset directory: {path}")
 
-    text_cache = _project_path(cfg.data.train.text_embedding_cache_dir)
-    if not text_cache.is_dir():
-        missing.append(f"task text embedding cache directory: {text_cache}")
+        stats_path = _project_path(split_cfg.pretrained_norm_stats)
+        if not stats_path.is_file():
+            missing.append(f"{split} normalization stats file: {stats_path}")
 
-    if bool(cfg.data.train.use_latent_cache):
-        latent_cache = _project_path(cfg.data.train.latent_cache_dir)
-        if not (latent_cache / "index.pt").is_file():
-            missing.append(f"task latent cache index: {latent_cache / 'index.pt'}")
+        text_cache = _project_path(split_cfg.text_embedding_cache_dir)
+        if not text_cache.is_dir():
+            missing.append(f"{split} text embedding cache directory: {text_cache}")
+
+        if bool(split_cfg.use_latent_cache):
+            latent_cache = _project_path(split_cfg.latent_cache_dir)
+            if not (latent_cache / "index.pt").is_file():
+                missing.append(
+                    f"{split} latent cache index: {latent_cache / 'index.pt'}"
+                )
     return missing
 
 

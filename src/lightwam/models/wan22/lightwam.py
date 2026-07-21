@@ -5,9 +5,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from PIL import Image
 
 from lightwam.utils.logging_config import get_logger
+from lightwam.memory import apply_recent_window_mask, validate_anchor_recent_layout
 
 from .action_dit import ActionDiT
 from .helpers.loader import (
@@ -55,6 +57,15 @@ class LightWAM(torch.nn.Module):
         video_backbone_type: str = "wan2_2_ti2v",
         video_latent_spatial_downsample_factor: int = 1,
         apply_video_latent_downsample_to_action_branch: bool = False,
+        history_enabled: bool = False,
+        history_min_size: int = 4,
+        history_max_size: int = 12,
+        history_raw_stride: int = 4,
+        history_anchor_size: int = 0,
+        history_anchor_stride: int = 4,
+        history_recent_min_size: Optional[int] = None,
+        history_recent_max_size: Optional[int] = None,
+        history_recent_stride: Optional[int] = None,
         video_train_shift: float = 5.0,
         video_infer_shift: float = 5.0,
         video_num_train_timesteps: int = 1000,
@@ -126,6 +137,101 @@ class LightWAM(torch.nn.Module):
         self.apply_video_latent_downsample_to_action_branch = bool(
             apply_video_latent_downsample_to_action_branch
         )
+        self.history_enabled = bool(history_enabled)
+        self.history_min_size = int(history_min_size)
+        self.history_max_size = int(history_max_size)
+        self.history_raw_stride = int(history_raw_stride)
+        self.history_anchor_size = int(history_anchor_size)
+        self.history_anchor_stride = int(history_anchor_stride)
+        self.history_recent_max_size = (
+            self.history_max_size - self.history_anchor_size
+            if history_recent_max_size is None
+            else int(history_recent_max_size)
+        )
+        self.history_recent_min_size = (
+            self.history_min_size
+            if history_recent_min_size is None
+            else int(history_recent_min_size)
+        )
+        self.history_recent_stride = (
+            self.history_raw_stride
+            if history_recent_stride is None
+            else int(history_recent_stride)
+        )
+        self.memory_gradient_monitoring_enabled = False
+        self._memory_gradient_stats: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        if self.history_min_size < 0 or self.history_max_size < self.history_min_size:
+            raise ValueError(
+                "History sizes must satisfy 0 <= min_size <= max_size, got "
+                f"{self.history_min_size} and {self.history_max_size}."
+            )
+        if self.history_enabled and self.history_min_size <= 0:
+            raise ValueError("Enabled history memory requires `min_size` to be positive.")
+        if self.history_raw_stride <= 0:
+            raise ValueError(f"`history_raw_stride` must be positive, got {self.history_raw_stride}.")
+        if self.history_enabled:
+            validate_anchor_recent_layout(
+                history_max_size=self.history_max_size,
+                anchor_size=self.history_anchor_size,
+                anchor_stride=self.history_anchor_stride,
+                recent_max_size=self.history_recent_max_size,
+                recent_stride=self.history_recent_stride,
+            )
+            if not 0 <= self.history_recent_min_size <= self.history_recent_max_size:
+                raise ValueError(
+                    "Recent history sizes must satisfy 0 <= min <= max, got "
+                    f"{self.history_recent_min_size} and {self.history_recent_max_size}."
+                )
+            if self.history_min_size != self.history_anchor_size + self.history_recent_min_size:
+                raise ValueError(
+                    "History min_size must equal anchor_size + recent_min_size, got "
+                    f"{self.history_min_size} != {self.history_anchor_size} + "
+                    f"{self.history_recent_min_size}."
+                )
+            if self.history_recent_stride != self.history_raw_stride:
+                raise ValueError(
+                    "Online observation stride and recent-history stride must match, got "
+                    f"{self.history_raw_stride} and {self.history_recent_stride}."
+                )
+            if self.history_anchor_size > 0 and self.history_anchor_stride != self.history_raw_stride:
+                raise ValueError(
+                    "Episode-start anchors must use the online observation stride, got "
+                    f"{self.history_anchor_stride} and {self.history_raw_stride}."
+                )
+            if bool(getattr(self.video_expert, "action_conditioned", False)):
+                raise ValueError(
+                    "Recent-observation memory currently requires an action-token-free video backbone."
+                )
+            if self.video_latent_spatial_downsample_factor != 2:
+                raise ValueError(
+                    "Recent-observation memory requires "
+                    "`video_latent_spatial_downsample_factor=2` so history uses the same "
+                    "low-resolution token grid as the video branch."
+                )
+            if self.apply_video_latent_downsample_to_action_branch:
+                raise ValueError(
+                    "Recent-observation memory keeps the action current frame on its native "
+                    "high-resolution token grid; "
+                    "set `apply_video_latent_downsample_to_action_branch=false`."
+                )
+            history_hidden_dim = int(self.video_expert.hidden_dim)
+            self.history_slot_embedding = nn.Embedding(
+                self.history_max_size,
+                history_hidden_dim,
+                device=self.device,
+                dtype=self.torch_dtype,
+            )
+            self.history_role_embedding = nn.Embedding(
+                2,
+                history_hidden_dim,
+                device=self.device,
+                dtype=self.torch_dtype,
+            )
+            nn.init.zeros_(self.history_slot_embedding.weight)
+            nn.init.zeros_(self.history_role_embedding.weight)
+        else:
+            self.history_slot_embedding = None
+            self.history_role_embedding = None
         self.loss_lambda_video = float(loss_lambda_video)
         self.loss_lambda_action = float(loss_lambda_action)
         self.use_first_frame_residual_video_target = bool(use_first_frame_residual_video_target)
@@ -162,6 +268,11 @@ class LightWAM(torch.nn.Module):
         self.freeze_backbone = bool(freeze_backbone)
         self.remove_original_action_expert = bool(remove_original_action_expert)
         self.state_fusion_action_expert = state_fusion_action_expert
+        if self.history_enabled and self.state_fusion_action_expert is None:
+            raise ValueError(
+                "Recent-observation memory is implemented for Light-WAM's "
+                "state-fusion action expert; enable the adapter state-fusion configuration."
+            )
         self.enable_timing_breakdown = False
         self.timing_breakdown_sync_cuda = True
         self._timing_breakdown: dict[str, float] = {}
@@ -198,6 +309,7 @@ class LightWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         video_latent_spatial_downsample_factor: int = 1,
         apply_video_latent_downsample_to_action_branch: bool = False,
+        history_memory: dict[str, Any] | None = None,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
         use_first_frame_residual_video_target: bool = False,
@@ -226,6 +338,21 @@ class LightWAM(torch.nn.Module):
         state_fusion_action_expert_config = (
             {} if state_fusion_action_expert_config is None else dict(state_fusion_action_expert_config)
         )
+        history_memory_cfg = {} if history_memory is None else dict(history_memory)
+        if bool(history_memory_cfg.get("enabled", False)):
+            history_mode = str(
+                history_memory_cfg.get("mode", "anchor_recent_fixed_slots_v1")
+            )
+            if history_mode != "anchor_recent_fixed_slots_v1":
+                raise ValueError(f"Unsupported history memory mode: {history_mode}.")
+            history_apply_to = str(
+                history_memory_cfg.get("apply_to", "action_branch_only")
+            )
+            if history_apply_to != "action_branch_only":
+                raise ValueError(
+                    "This implementation supports history memory only on the direct action "
+                    f"branch, got apply_to={history_apply_to}."
+                )
         use_wam_adapter = bool(wam_adapter_cfg.get("use_wam_adapter", False))
         freeze_backbone = bool(wam_adapter_cfg.get("freeze_backbone", True))
         remove_original_action_expert = bool(
@@ -330,6 +457,15 @@ class LightWAM(torch.nn.Module):
             apply_video_latent_downsample_to_action_branch=(
                 apply_video_latent_downsample_to_action_branch
             ),
+            history_enabled=bool(history_memory_cfg.get("enabled", False)),
+            history_min_size=int(history_memory_cfg.get("min_size", 4)),
+            history_max_size=int(history_memory_cfg.get("max_size", 12)),
+            history_raw_stride=int(history_memory_cfg.get("raw_stride", 4)),
+            history_anchor_size=int(history_memory_cfg.get("anchor_size", 0)),
+            history_anchor_stride=int(history_memory_cfg.get("anchor_stride", 4)),
+            history_recent_min_size=history_memory_cfg.get("recent_min_size"),
+            history_recent_max_size=history_memory_cfg.get("recent_max_size"),
+            history_recent_stride=history_memory_cfg.get("recent_stride"),
             video_train_shift=video_train_shift,
             video_infer_shift=video_infer_shift,
             video_num_train_timesteps=video_num_train_timesteps,
@@ -413,6 +549,13 @@ class LightWAM(torch.nn.Module):
         if proprio_encoder is not None:
             proprio_encoder.train()
             proprio_encoder.requires_grad_(True)
+        if self.history_enabled:
+            if self.history_slot_embedding is None or self.history_role_embedding is None:
+                raise RuntimeError("History embeddings are missing for an enabled memory model.")
+            self.history_slot_embedding.train()
+            self.history_slot_embedding.requires_grad_(True)
+            self.history_role_embedding.train()
+            self.history_role_embedding.requires_grad_(True)
 
     def uses_state_fusion_action_expert(self) -> bool:
         return bool(
@@ -592,6 +735,8 @@ class LightWAM(torch.nn.Module):
         fuse_vae_embedding_in_latents: bool,
         action: Optional[torch.Tensor] = None,
         apply_spatial_downsample: bool = True,
+        frame_position_offset: int = 0,
+        spatial_position_scale: int = 1,
     ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
         compression_meta = None
         latents_for_backbone = latents_video
@@ -606,6 +751,8 @@ class LightWAM(torch.nn.Module):
             context_mask=context_mask,
             action=action,
             fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
+            frame_position_offset=frame_position_offset,
+            spatial_position_scale=spatial_position_scale,
         )
         return video_pre, compression_meta
 
@@ -616,6 +763,7 @@ class LightWAM(torch.nn.Module):
         context: torch.Tensor,
         context_mask: torch.Tensor,
         fuse_vae_embedding_in_latents: bool,
+        frame_position_offset: int = 0,
     ) -> dict[str, Any]:
         # The single-frame action observation path stays high resolution by default.
         video_pre, _ = self._build_video_pre(
@@ -626,8 +774,441 @@ class LightWAM(torch.nn.Module):
             action=None,
             fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
             apply_spatial_downsample=self.apply_video_latent_downsample_to_action_branch,
+            frame_position_offset=frame_position_offset,
         )
         return video_pre
+
+    def _sample_recent_history_window_size(self) -> int:
+        """Sample the active recent suffix while always retaining anchor slots."""
+        if not self.history_enabled:
+            return 0
+        # ``configure_trainable_modules`` intentionally leaves the LightWAM
+        # wrapper in eval mode and puts the trainable video expert in train mode.
+        # Checking only ``self.training`` silently disabled random windows.
+        video_expert = getattr(self, "video_expert", None)
+        is_training = bool(
+            self.training or (video_expert is not None and video_expert.training)
+        )
+        if not is_training:
+            return int(getattr(self, "history_recent_max_size", self.history_max_size))
+        sample_device = self.device
+        if dist.is_available() and dist.is_initialized() and dist.get_backend() != "nccl":
+            sample_device = torch.device("cpu")
+        sampled_size = torch.empty((1,), dtype=torch.int64, device=sample_device)
+        if not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0:
+            sampled_size.random_(
+                int(getattr(self, "history_recent_min_size", self.history_min_size)),
+                int(getattr(self, "history_recent_max_size", self.history_max_size)) + 1,
+            )
+        if dist.is_available() and dist.is_initialized():
+            dist.broadcast(sampled_size, src=0)
+        return int(sampled_size.item())
+
+    def _sample_history_window_size(self) -> int:
+        """Compatibility helper returning anchors plus the sampled recent suffix."""
+        if not self.history_enabled:
+            return 0
+        return int(getattr(self, "history_anchor_size", 0)) + self._sample_recent_history_window_size()
+
+    def _prepare_history_latents(
+        self,
+        sample: dict[str, Any],
+        input_latents: torch.Tensor,
+        tiled: bool,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], int]:
+        if not self.history_enabled:
+            return None, None, 0
+        if "history_valid_mask" not in sample:
+            raise ValueError("History memory is enabled but `sample['history_valid_mask']` is missing.")
+        history_valid_mask = sample["history_valid_mask"]
+        if not isinstance(history_valid_mask, torch.Tensor):
+            history_valid_mask = torch.as_tensor(history_valid_mask, dtype=torch.bool)
+        if history_valid_mask.ndim == 1:
+            history_valid_mask = history_valid_mask.unsqueeze(0)
+        if history_valid_mask.ndim != 2:
+            raise ValueError(
+                "`history_valid_mask` must be [B,H], "
+                f"got {tuple(history_valid_mask.shape)}."
+            )
+        batch_size, max_history = history_valid_mask.shape
+        if batch_size != input_latents.shape[0] or max_history != self.history_max_size:
+            raise ValueError(
+                "History mask shape mismatch: "
+                f"got {tuple(history_valid_mask.shape)}, expected "
+                f"({input_latents.shape[0]}, {self.history_max_size})."
+            )
+        history_valid_mask = history_valid_mask.to(
+            device=self.device,
+            dtype=torch.bool,
+            non_blocking=True,
+        )
+        recent_window_size = self._sample_recent_history_window_size()
+        # Tensor shape and slot identity stay fixed. Randomization changes only
+        # which recent suffix is visible; episode-start anchors are never dropped.
+        history_valid_mask = apply_recent_window_mask(
+            history_valid_mask,
+            anchor_size=self.history_anchor_size,
+            recent_window_size=recent_window_size,
+        )
+
+        cached_history = sample.get("history_video_latents")
+        raw_history = sample.get("history_video")
+        if cached_history is not None and raw_history is not None:
+            raise ValueError("Provide only one of `history_video_latents` and `history_video`.")
+        if cached_history is not None:
+            if cached_history.ndim == 4:
+                cached_history = cached_history.unsqueeze(0)
+            if cached_history.ndim != 5:
+                raise ValueError(
+                    "`history_video_latents` must be [B,C,H,h,w], "
+                    f"got {tuple(cached_history.shape)}."
+                )
+            if cached_history.shape[:3] != (
+                input_latents.shape[0],
+                input_latents.shape[1],
+                self.history_max_size,
+            ) or cached_history.shape[-2:] != input_latents.shape[-2:]:
+                raise ValueError(
+                    "Cached history latent shape mismatch: "
+                    f"history={tuple(cached_history.shape)}, current={tuple(input_latents.shape)}."
+                )
+            history_latents = cached_history.to(
+                device=self.device,
+                dtype=self.torch_dtype,
+                non_blocking=True,
+            ).contiguous()
+        elif raw_history is not None:
+            if raw_history.ndim != 5:
+                raise ValueError(
+                    "`history_video` must be [B,3,H,height,width], "
+                    f"got {tuple(raw_history.shape)}."
+                )
+            if raw_history.shape[:3] != (input_latents.shape[0], 3, self.history_max_size):
+                raise ValueError(
+                    "Raw history shape mismatch: "
+                    f"got {tuple(raw_history.shape)}, expected batch={input_latents.shape[0]} "
+                    f"and H={self.history_max_size}."
+                )
+            # Flatten only the temporal axis into the batch: every valid observation
+            # is encoded as an independent T=1 video, never as a temporal VAE clip.
+            history_frames = raw_history.permute(0, 2, 1, 3, 4).reshape(
+                batch_size * self.history_max_size,
+                3,
+                raw_history.shape[-2],
+                raw_history.shape[-1],
+            )
+            valid_flat = history_valid_mask.reshape(-1)
+            valid_flat_source = valid_flat.to(device=history_frames.device)
+            latent_height, latent_width = input_latents.shape[-2:]
+            history_bht = input_latents.new_zeros(
+                (
+                    batch_size * self.history_max_size,
+                    input_latents.shape[1],
+                    1,
+                    latent_height,
+                    latent_width,
+                )
+            )
+            if bool(valid_flat.any().item()):
+                valid_frames = history_frames[valid_flat_source].to(
+                    device=self.device,
+                    dtype=self.torch_dtype,
+                    non_blocking=True,
+                ).unsqueeze(2)
+                encoded_valid = self._encode_video_latents(valid_frames, tiled=tiled)
+                if encoded_valid.ndim != 5 or encoded_valid.shape[2] != 1:
+                    raise ValueError(
+                        "Independent history VAE encoding must return [N,C,1,h,w], "
+                        f"got {tuple(encoded_valid.shape)}."
+                    )
+                if encoded_valid.shape[1:] != history_bht.shape[1:]:
+                    raise ValueError(
+                        "History/current latent grid mismatch: "
+                        f"history={tuple(encoded_valid.shape)}, current={tuple(input_latents.shape)}."
+                    )
+                history_bht[valid_flat] = encoded_valid
+            history_latents = history_bht.reshape(
+                batch_size,
+                self.history_max_size,
+                input_latents.shape[1],
+                1,
+                latent_height,
+                latent_width,
+            )[:, :, :, 0].permute(0, 2, 1, 3, 4).contiguous()
+        else:
+            raise ValueError(
+                "History memory is enabled but neither `history_video` nor "
+                "`history_video_latents` is present."
+            )
+
+        return history_latents, history_valid_mask, recent_window_size
+
+    def _build_history_video_pre(
+        self,
+        history_latents: torch.Tensor,
+        context: torch.Tensor,
+        context_mask: torch.Tensor,
+        spatial_position_scale: int,
+    ) -> dict[str, Any]:
+        if history_latents.ndim != 5 or history_latents.shape[2] <= 0:
+            raise ValueError(
+                "`history_latents` must be a non-empty [B,C,H,h,w] tensor, "
+                f"got {tuple(history_latents.shape)}."
+            )
+        lowres_history, _ = self._maybe_downsample_video_latents_for_backbone(history_latents)
+        clean_timestep = torch.zeros(
+            (history_latents.shape[0],),
+            dtype=history_latents.dtype,
+            device=history_latents.device,
+        )
+        history_pre = self.video_expert.pre_dit(
+            x=lowres_history,
+            timestep=clean_timestep,
+            context=context,
+            context_mask=context_mask,
+            action=None,
+            fuse_vae_embedding_in_latents=True,
+            frame_position_offset=0,
+            spatial_position_scale=spatial_position_scale,
+            # Every memory item is an independently encoded T=1 observation,
+            # not a causal video latent. Slot/type embeddings below carry its
+            # memory identity without pretending the slots are video time.
+            temporal_position_ids=torch.zeros(
+                history_latents.shape[2],
+                dtype=torch.long,
+            ),
+        )
+        if self.history_slot_embedding is None or self.history_role_embedding is None:
+            raise RuntimeError("History embeddings are not initialized.")
+        batch_size = int(history_pre["tokens"].shape[0])
+        history_frames = int(history_latents.shape[2])
+        tokens_per_frame = int(history_pre["meta"]["tokens_per_frame"])
+        hidden_dim = int(history_pre["tokens"].shape[-1])
+        tokens = history_pre["tokens"].view(
+            batch_size,
+            history_frames,
+            tokens_per_frame,
+            hidden_dim,
+        )
+        slot_ids = torch.arange(history_frames, device=tokens.device, dtype=torch.long)
+        role_ids = torch.ones(history_frames, device=tokens.device, dtype=torch.long)
+        role_ids[: self.history_anchor_size] = 0
+        slot_bias = self.history_slot_embedding(slot_ids)
+        role_bias = self.history_role_embedding(role_ids)
+        history_pre["tokens"] = (
+            tokens + (slot_bias + role_bias)[None, :, None, :]
+        ).reshape(batch_size, history_frames * tokens_per_frame, hidden_dim).contiguous()
+        return history_pre
+
+    def set_memory_gradient_monitoring(self, enabled: bool) -> None:
+        """Enable lightweight gradient diagnostics for history and current tokens."""
+        self.memory_gradient_monitoring_enabled = bool(enabled)
+        self._memory_gradient_stats = {}
+
+    def _reset_memory_gradient_stats(self) -> None:
+        self._memory_gradient_stats = {}
+
+    def _record_memory_gradient_stat(
+        self,
+        key: str,
+        value_sum: torch.Tensor,
+        value_count: torch.Tensor,
+    ) -> None:
+        value_sum = value_sum.detach()
+        value_count = value_count.detach()
+        previous = self._memory_gradient_stats.get(key)
+        if previous is None:
+            self._memory_gradient_stats[key] = (value_sum, value_count)
+        else:
+            self._memory_gradient_stats[key] = (
+                previous[0] + value_sum,
+                previous[1] + value_count,
+            )
+
+    def _register_memory_gradient_hooks(
+        self,
+        *,
+        branch: str,
+        history_tokens: torch.Tensor,
+        main_tokens: torch.Tensor,
+        history_valid_mask: torch.Tensor,
+        history_tokens_per_frame: int,
+        main_tokens_per_frame: int,
+    ) -> None:
+        # Adapter training intentionally leaves the top-level LightWAM module
+        # in eval mode while putting the video expert in train mode.  Treat the
+        # model as inference-only only when both levels are in eval mode.
+        if not self.memory_gradient_monitoring_enabled or (
+            not self.training and not self.video_expert.training
+        ):
+            return
+
+        # The patch embedding is frozen in the normal Light-WAM setup, while
+        # the cached latents are plain inputs.  Consequently these boundary
+        # tensors do not require gradients even though trainable LoRA/adapters
+        # downstream do.  Make them gradient leaves solely for diagnostics so
+        # the hooks below can observe how strongly each branch uses them.
+        if not history_tokens.requires_grad:
+            history_tokens.requires_grad_(True)
+        if not main_tokens.requires_grad:
+            main_tokens.requires_grad_(True)
+
+        branch = str(branch)
+        batch_size, history_frames = history_valid_mask.shape
+        valid = history_valid_mask.to(device=history_tokens.device, dtype=torch.bool)
+        history_width = int(history_tokens_per_frame) * int(history_tokens.shape[-1])
+        current_width = int(main_tokens_per_frame) * int(main_tokens.shape[-1])
+
+        def history_hook(gradient: torch.Tensor) -> None:
+            frame_gradient = gradient.detach().reshape(batch_size, history_frames, -1)
+            frame_rms = torch.linalg.vector_norm(
+                frame_gradient,
+                ord=2,
+                dim=2,
+                dtype=torch.float32,
+            ) / float(history_width) ** 0.5
+            valid_float = valid.to(dtype=frame_rms.dtype)
+            self._record_memory_gradient_stat(
+                f"{branch}/history_grad_rms",
+                (frame_rms * valid_float).sum(),
+                valid_float.sum(),
+            )
+            # age_01 is the most recent history frame; larger ages are older.
+            for age in range(1, history_frames + 1):
+                frame_index = history_frames - age
+                age_valid = valid_float[:, frame_index]
+                self._record_memory_gradient_stat(
+                    f"{branch}/age_{age:02d}_grad_rms",
+                    (frame_rms[:, frame_index] * age_valid).sum(),
+                    age_valid.sum(),
+                )
+
+        def current_hook(gradient: torch.Tensor) -> None:
+            current_gradient = gradient.detach()[:, :main_tokens_per_frame].reshape(batch_size, -1)
+            current_rms = torch.linalg.vector_norm(
+                current_gradient,
+                ord=2,
+                dim=1,
+                dtype=torch.float32,
+            ) / float(current_width) ** 0.5
+            self._record_memory_gradient_stat(
+                f"{branch}/current_grad_rms",
+                current_rms.sum(),
+                current_rms.new_tensor(float(batch_size)),
+            )
+
+        history_tokens.register_hook(history_hook)
+        main_tokens.register_hook(current_hook)
+
+    def pop_memory_gradient_stats(self) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+        stats = self._memory_gradient_stats
+        self._memory_gradient_stats = {}
+        return stats
+
+    @staticmethod
+    def _build_recent_history_attention_mask(
+        history_valid_mask: torch.Tensor,
+        history_tokens_per_frame: int,
+        main_num_frames: int,
+        main_tokens_per_frame: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """History is causal; current/future see valid history and all main tokens."""
+        if history_valid_mask.ndim != 2:
+            raise ValueError(
+                f"`history_valid_mask` must be [B,H], got {tuple(history_valid_mask.shape)}."
+            )
+        batch_size, history_frames = history_valid_mask.shape
+        if history_frames <= 0 or main_num_frames <= 0:
+            raise ValueError("History and main frame counts must both be positive.")
+        token_counts = [int(history_tokens_per_frame)] * history_frames + [
+            int(main_tokens_per_frame)
+        ] * int(main_num_frames)
+        if any(count <= 0 for count in token_counts):
+            raise ValueError(f"Frame token counts must be positive, got {token_counts}.")
+        offsets = [0]
+        for count in token_counts:
+            offsets.append(offsets[-1] + count)
+        mask = torch.zeros(
+            (batch_size, offsets[-1], offsets[-1]),
+            dtype=torch.bool,
+            device=device,
+        )
+        valid = history_valid_mask.to(device=device, dtype=torch.bool)
+        for query_index in range(history_frames):
+            query_slice = slice(offsets[query_index], offsets[query_index + 1])
+            for key_index in range(query_index + 1):
+                key_slice = slice(offsets[key_index], offsets[key_index + 1])
+                allowed = valid[:, query_index] & valid[:, key_index]
+                mask[:, query_slice, key_slice] = allowed[:, None, None]
+            # Padded queries are isolated in their own slot so SDPA never receives
+            # an all-masked row and padded content cannot affect valid tokens.
+            invalid_query = ~valid[:, query_index]
+            mask[:, query_slice, query_slice] |= invalid_query[:, None, None]
+
+        main_start = offsets[history_frames]
+        current_end = offsets[history_frames + 1]
+        # The clean current frame cannot read noisy future tokens.
+        mask[:, main_start:current_end, main_start:current_end] = True
+        # Future queries preserve the existing first-frame-causal behavior: they
+        # read current plus the whole jointly denoised future clip.
+        if main_num_frames > 1:
+            mask[:, current_end:, main_start:] = True
+        for key_index in range(history_frames):
+            key_slice = slice(offsets[key_index], offsets[key_index + 1])
+            mask[:, main_start:, key_slice] = valid[:, key_index, None, None]
+        return mask.unsqueeze(1)
+
+    def _merge_history_and_main_pre(
+        self,
+        history_pre: dict[str, Any],
+        main_pre: dict[str, Any],
+        history_valid_mask: torch.Tensor,
+        monitor_branch: Optional[str] = None,
+    ) -> tuple[dict[str, Any], slice]:
+        history_frames = int(history_valid_mask.shape[1])
+        history_tokens_per_frame = int(history_pre["meta"]["tokens_per_frame"])
+        main_frames = int(main_pre["meta"]["grid_size"][0])
+        main_tokens_per_frame = int(main_pre["meta"]["tokens_per_frame"])
+        history_token_count = int(history_pre["tokens"].shape[1])
+        main_token_count = int(main_pre["tokens"].shape[1])
+        if history_token_count != history_frames * history_tokens_per_frame:
+            raise ValueError("History pre-state token count does not match its frame metadata.")
+
+        if monitor_branch is not None:
+            self._register_memory_gradient_hooks(
+                branch=monitor_branch,
+                history_tokens=history_pre["tokens"],
+                main_tokens=main_pre["tokens"],
+                history_valid_mask=history_valid_mask,
+                history_tokens_per_frame=history_tokens_per_frame,
+                main_tokens_per_frame=main_tokens_per_frame,
+            )
+
+        merged = {
+            "tokens": torch.cat([history_pre["tokens"], main_pre["tokens"]], dim=1),
+            "freqs": torch.cat([history_pre["freqs"], main_pre["freqs"]], dim=0),
+            "t": torch.cat([history_pre["t"], main_pre["t"]], dim=1),
+            "t_mod": torch.cat([history_pre["t_mod"], main_pre["t_mod"]], dim=1),
+            "context": main_pre["context"],
+            "context_mask": torch.cat(
+                [history_pre["context_mask"], main_pre["context_mask"]], dim=1
+            ),
+            "meta": {
+                **main_pre["meta"],
+                "history_num_frames": history_frames,
+                "history_tokens_per_frame": history_tokens_per_frame,
+                "main_token_start": history_token_count,
+            },
+        }
+        merged["self_attn_mask"] = self._build_recent_history_attention_mask(
+            history_valid_mask=history_valid_mask,
+            history_tokens_per_frame=history_tokens_per_frame,
+            main_num_frames=main_frames,
+            main_tokens_per_frame=main_tokens_per_frame,
+            device=merged["tokens"].device,
+        )
+        return merged, slice(history_token_count, history_token_count + main_token_count)
 
     def _use_lowres_video_training_objective(self) -> bool:
         return int(self.video_latent_spatial_downsample_factor) > 1
@@ -1056,6 +1637,138 @@ class LightWAM(torch.nn.Module):
             z = z[0].unsqueeze(0)
         return z
 
+    @torch.no_grad()
+    def encode_observation_latent(
+        self,
+        input_image: torch.Tensor,
+        tiled: bool = False,
+    ) -> torch.Tensor:
+        """Encode one processed observation once for the online memory bank.
+
+        The returned CPU tensor is ``[C,h,w]`` and follows the exact same T=1
+        VAE path used by ``infer_action``.
+        """
+        latent = self._encode_input_image_latents_tensor(
+            input_image=input_image.to(device=self.device, dtype=self.torch_dtype),
+            tiled=tiled,
+        )
+        return latent[0, :, 0].detach().to(device="cpu", dtype=torch.float32)
+
+    @torch.no_grad()
+    def _prepare_inference_history_latents(
+        self,
+        history_images: Optional[torch.Tensor],
+        current_latents: torch.Tensor,
+        tiled: bool,
+        history_video_latents: Optional[torch.Tensor] = None,
+        history_valid_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        if not self.history_enabled:
+            if (
+                (history_images is not None and int(history_images.numel()) > 0)
+                or history_video_latents is not None
+                or history_valid_mask is not None
+            ):
+                raise ValueError("History input was provided but history memory is disabled.")
+            return None, None
+        if history_images is not None and history_video_latents is not None:
+            raise ValueError("Provide only one of `history_images` and `history_video_latents`.")
+        if history_video_latents is not None:
+            if history_valid_mask is None:
+                raise ValueError("`history_valid_mask` is required with cached history latents.")
+            if history_video_latents.ndim == 4:
+                history_video_latents = history_video_latents.unsqueeze(0)
+            if history_video_latents.ndim != 5:
+                raise ValueError(
+                    "`history_video_latents` must be [C,H,h,w] or [1,C,H,h,w], "
+                    f"got {tuple(history_video_latents.shape)}."
+                )
+            expected = (
+                1,
+                int(current_latents.shape[1]),
+                self.history_max_size,
+                int(current_latents.shape[-2]),
+                int(current_latents.shape[-1]),
+            )
+            if tuple(history_video_latents.shape) != expected:
+                raise ValueError(
+                    "Cached inference history shape mismatch: "
+                    f"got {tuple(history_video_latents.shape)}, expected {expected}."
+                )
+            history_valid_mask = torch.as_tensor(history_valid_mask, dtype=torch.bool)
+            if history_valid_mask.ndim == 1:
+                history_valid_mask = history_valid_mask.unsqueeze(0)
+            if tuple(history_valid_mask.shape) != (1, self.history_max_size):
+                raise ValueError(
+                    "Inference history mask must be [1,H], got "
+                    f"{tuple(history_valid_mask.shape)}."
+                )
+            return (
+                history_video_latents.to(
+                    device=self.device,
+                    dtype=self.torch_dtype,
+                    non_blocking=True,
+                ).contiguous(),
+                history_valid_mask.to(
+                    device=self.device,
+                    dtype=torch.bool,
+                    non_blocking=True,
+                ).contiguous(),
+            )
+        if history_images is None:
+            history_images = current_latents.new_empty((0, 3, 0, 0))
+        if history_images.ndim == 5 and history_images.shape[0] == 1:
+            history_images = history_images[0]
+        if history_images.ndim != 4 or history_images.shape[1] != 3:
+            raise ValueError(
+                "`history_images` must be [H,3,height,width] or [1,H,3,height,width], "
+                f"got {tuple(history_images.shape)}."
+            )
+        if history_images.shape[0] > self.history_max_size:
+            history_images = history_images[-self.history_max_size :]
+        num_valid = int(history_images.shape[0])
+        history_latents = current_latents.new_zeros(
+            (
+                1,
+                current_latents.shape[1],
+                self.history_max_size,
+                current_latents.shape[-2],
+                current_latents.shape[-1],
+            )
+        )
+        history_valid_mask = torch.zeros(
+            (1, self.history_max_size),
+            dtype=torch.bool,
+            device=self.device,
+        )
+        if num_valid > 0:
+            vae_spatial_factor = int(self.vae.upsampling_factor)
+            if history_images.shape[-2:] != (
+                current_latents.shape[-2] * vae_spatial_factor,
+                current_latents.shape[-1] * vae_spatial_factor,
+            ):
+                raise ValueError(
+                    "History/current image spatial shape mismatch after VAE scaling: "
+                    f"history={tuple(history_images.shape[-2:])}, "
+                    f"current latent={tuple(current_latents.shape[-2:])}."
+                )
+            encoded = self._encode_video_latents(
+                history_images.to(
+                    device=self.device,
+                    dtype=self.torch_dtype,
+                    non_blocking=True,
+                ).unsqueeze(2),
+                tiled=tiled,
+            )
+            if encoded.ndim != 5 or encoded.shape[2] != 1:
+                raise ValueError(
+                    "Independent inference history encoding must return [H,C,1,h,w], "
+                    f"got {tuple(encoded.shape)}."
+                )
+            history_latents[:, :, -num_valid:] = encoded[:, :, 0].permute(1, 0, 2, 3).unsqueeze(0)
+            history_valid_mask[:, -num_valid:] = True
+        return history_latents, history_valid_mask
+
     def _decode_latents(self, latents, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         video_tensor = self.vae.decode(latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
         video_tensor = video_tensor.squeeze(0).detach().float().clamp(-1, 1)
@@ -1185,6 +1898,12 @@ class LightWAM(torch.nn.Module):
             input_video = video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
             input_latents = self._encode_video_latents(input_video, tiled=tiled)
 
+        history_latents, history_valid_mask, history_recent_window_size = self._prepare_history_latents(
+            sample=sample,
+            input_latents=input_latents,
+            tiled=tiled,
+        )
+
         first_frame_latents = None
         fuse_flag = False
         if getattr(self.video_expert, "fuse_vae_embedding_in_latents", False):
@@ -1229,6 +1948,9 @@ class LightWAM(torch.nn.Module):
             "action": action,
             "action_is_pad": action_is_pad,
             "image_is_pad": image_is_pad,
+            "history_latents": history_latents,
+            "history_valid_mask": history_valid_mask,
+            "history_recent_window_size": history_recent_window_size,
         }
 
     @torch.no_grad()
@@ -1360,8 +2082,11 @@ class LightWAM(torch.nn.Module):
         action: Optional[torch.Tensor] = None,
         apply_spatial_downsample: bool = True,
         restore_spatial_resolution: bool = True,
+        history_latents: Optional[torch.Tensor] = None,
+        history_valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         total_timing = self._timing_start()
+        history_frames = 0 if history_latents is None else int(history_latents.shape[2])
         video_pre, compression_meta = self._build_video_pre(
             latents_video=latents_video,
             timestep_video=timestep_video,
@@ -1370,9 +2095,28 @@ class LightWAM(torch.nn.Module):
             action=action,
             fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
             apply_spatial_downsample=apply_spatial_downsample,
+            frame_position_offset=history_frames,
         )
+        backbone_pre = video_pre
+        main_token_slice = slice(0, int(video_pre["tokens"].shape[1]))
+        if history_latents is not None:
+            if history_valid_mask is None:
+                raise ValueError("`history_valid_mask` is required with `history_latents`.")
+            history_pre = self._build_history_video_pre(
+                history_latents=history_latents,
+                context=context,
+                context_mask=context_mask,
+                spatial_position_scale=1,
+            )
+            backbone_pre, main_token_slice = self._merge_history_and_main_pre(
+                history_pre=history_pre,
+                main_pre=video_pre,
+                history_valid_mask=history_valid_mask,
+                monitor_branch="video",
+            )
         backbone_timing = self._timing_start()
-        video_tokens = self.video_expert.forward_backbone(video_pre)
+        video_tokens = self.video_expert.forward_backbone(backbone_pre)
+        video_tokens = video_tokens[:, main_token_slice]
         self._timing_end("future_backbone", backbone_timing)
         decode_timing = self._timing_start()
         pred_video = self._decode_video_tokens(
@@ -1392,6 +2136,8 @@ class LightWAM(torch.nn.Module):
         context: torch.Tensor,
         context_mask: torch.Tensor,
         fuse_vae_embedding_in_latents: bool,
+        history_latents: Optional[torch.Tensor] = None,
+        history_valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if not self.uses_state_fusion_action_expert():
             raise RuntimeError(
@@ -1417,15 +2163,37 @@ class LightWAM(torch.nn.Module):
             context=context,
             context_mask=context_mask,
             fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
+            # Keep the current observation at the pretrained T=0 RoPE position.
+            # Memory slots have their own learned slot/type identity.
+            frame_position_offset=0,
         )
+        backbone_pre = video_pre
+        current_token_slice = slice(0, int(video_pre["tokens"].shape[1]))
+        if history_latents is not None:
+            if history_valid_mask is None:
+                raise ValueError("`history_valid_mask` is required with `history_latents`.")
+            # History stays on the low-resolution video token grid. Its spatial RoPE
+            # coordinates are scaled onto the native current-frame action grid.
+            history_pre = self._build_history_video_pre(
+                history_latents=history_latents,
+                context=context,
+                context_mask=context_mask,
+                spatial_position_scale=self.video_latent_spatial_downsample_factor,
+            )
+            backbone_pre, current_token_slice = self._merge_history_and_main_pre(
+                history_pre=history_pre,
+                main_pre=video_pre,
+                history_valid_mask=history_valid_mask,
+                monitor_branch="action",
+            )
         # The new action expert consumes multi-layer pooled [h, h', delta] features from the
         # single-observation backbone pass, matching the direct-action inference path.
         backbone_timing = self._timing_start()
-        _ = self.video_expert.forward_backbone(video_pre)
+        _ = self.video_expert.forward_backbone(backbone_pre)
         self._timing_end("action_backbone", backbone_timing)
         expert_timing = self._timing_start()
         pred_action = self.state_fusion_action_expert(
-            self._build_multilayer_action_fusion_inputs(),
+            self._build_multilayer_action_fusion_inputs(video_token_slice=current_token_slice),
             action_horizon=action_horizon,
         )
         self._timing_end("state_fusion_action_expert", expert_timing)
@@ -1455,6 +2223,8 @@ class LightWAM(torch.nn.Module):
         action_is_pad = inputs["action_is_pad"]
         image_is_pad = inputs["image_is_pad"]
         fuse_flag = inputs["fuse_vae_embedding_in_latents"]
+        history_latents = inputs["history_latents"]
+        history_valid_mask = inputs["history_valid_mask"]
 
         timestep_video = self.train_video_scheduler.sample_training_t(
             batch_size=batch_size,
@@ -1478,6 +2248,11 @@ class LightWAM(torch.nn.Module):
             fuse_vae_embedding_in_latents=fuse_flag,
             apply_spatial_downsample=video_train_targets["apply_spatial_downsample"],
             restore_spatial_resolution=video_train_targets["restore_spatial_resolution"],
+            # Memory supervises the action decision only. Keeping the auxiliary
+            # future-video branch unchanged avoids mixing independent T=1 memory
+            # observations with causal future-video latent time.
+            history_latents=None,
+            history_valid_mask=None,
         )
 
         observation_latents = inputs["first_frame_latents"]
@@ -1489,6 +2264,8 @@ class LightWAM(torch.nn.Module):
             context=context,
             context_mask=context_mask,
             fuse_vae_embedding_in_latents=fuse_flag,
+            history_latents=history_latents,
+            history_valid_mask=history_valid_mask,
         )
 
         include_initial_video_step = inputs["first_frame_latents"] is None
@@ -1515,12 +2292,17 @@ class LightWAM(torch.nn.Module):
 
         loss_total = self.loss_lambda_video * loss_video + self.loss_lambda_action * loss_action
         loss_dict = self._build_loss_dict(loss_video=loss_video, loss_action=loss_action)
+        if self.history_enabled:
+            loss_dict["memory_recent_window_size"] = float(
+                inputs["history_recent_window_size"]
+            )
         self._timing_end("training_loss_total", total_timing)
         if self.enable_timing_breakdown:
             loss_dict.update(self._get_timing_breakdown_metrics())
         return loss_total, loss_dict
 
     def training_loss(self, sample, tiled: bool = False):
+        self._reset_memory_gradient_stats()
         if self.uses_state_fusion_action_expert():
             return self._training_loss_state_fusion(sample, tiled=tiled)
 
@@ -1668,6 +2450,7 @@ class LightWAM(torch.nn.Module):
         frames so it does not retain extra training activations in GPU memory.
         """
         was_training = self.training
+        was_video_expert_training = self.video_expert.training
         self.eval()
         try:
             inputs = self.build_inputs(sample, tiled=tiled)
@@ -1697,6 +2480,8 @@ class LightWAM(torch.nn.Module):
                 fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
                 apply_spatial_downsample=video_train_targets["apply_spatial_downsample"],
                 restore_spatial_resolution=video_train_targets["restore_spatial_resolution"],
+                history_latents=None,
+                history_valid_mask=None,
             )
             pred_clean = self._estimate_clean_video_latents(
                 noisy_latents=video_train_targets["latents_video"],
@@ -1731,6 +2516,11 @@ class LightWAM(torch.nn.Module):
         finally:
             if was_training:
                 self.train()
+            elif was_video_expert_training:
+                # Adapter training intentionally keeps the wrapper in eval mode.
+                # Restore the selective train/freeze policy after visualization
+                # so random memory windows do not silently become fixed.
+                self.configure_trainable_modules()
 
     @torch.no_grad()
     def _predict_joint_noise(
@@ -1917,6 +2707,7 @@ class LightWAM(torch.nn.Module):
         rand_device: str = "cpu",
         tiled: bool = False,
         test_action_with_infer_action: bool = True,
+        history_images: Optional[torch.Tensor] = None,
     ) -> dict[str, Any]:
         del negative_prompt, text_cfg_scale
         self.eval()
@@ -1935,6 +2726,7 @@ class LightWAM(torch.nn.Module):
                 rand_device=rand_device,
                 tiled=tiled,
                 proprio=proprio.clone() if proprio is not None else None,
+                history_images=history_images.clone() if history_images is not None else None,
             )["action"]
 
         if input_image.ndim == 3:
@@ -1988,6 +2780,11 @@ class LightWAM(torch.nn.Module):
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
         first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+        history_latents, history_valid_mask = self._prepare_inference_history_latents(
+            history_images=history_images,
+            current_latents=first_frame_latents,
+            tiled=tiled,
+        )
         latents_video[:, :, 0:1] = first_frame_latents.clone()
         fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
 
@@ -2026,6 +2823,8 @@ class LightWAM(torch.nn.Module):
             context=context,
             context_mask=context_mask,
             fuse_vae_embedding_in_latents=fuse_flag,
+            history_latents=history_latents,
+            history_valid_mask=history_valid_mask,
         )
 
         infer_timesteps_video, infer_deltas_video = self.infer_video_scheduler.build_inference_schedule(
@@ -2043,6 +2842,8 @@ class LightWAM(torch.nn.Module):
                 context_mask=context_mask,
                 action=action,
                 fuse_vae_embedding_in_latents=fuse_flag,
+                history_latents=None,
+                history_valid_mask=None,
             )
             latents_video = self.infer_video_scheduler.step(pred_video, step_delta_video, latents_video)
             latents_video[:, :, 0:1] = first_frame_latents.clone()
@@ -2078,6 +2879,7 @@ class LightWAM(torch.nn.Module):
         rand_device: str = "cpu",
         tiled: bool = False,
         test_action_with_infer_action: bool = True,
+        history_images: Optional[torch.Tensor] = None,
     ) -> dict[str, Any]:
         if self.uses_state_fusion_action_expert():
             return self._infer_joint_state_fusion(
@@ -2097,6 +2899,7 @@ class LightWAM(torch.nn.Module):
                 rand_device=rand_device,
                 tiled=tiled,
                 test_action_with_infer_action=test_action_with_infer_action,
+                history_images=history_images,
             )
 
         self.eval()
@@ -2275,6 +3078,9 @@ class LightWAM(torch.nn.Module):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        history_images: Optional[torch.Tensor] = None,
+        history_video_latents: Optional[torch.Tensor] = None,
+        history_valid_mask: Optional[torch.Tensor] = None,
     ) -> dict[str, Any]:
         self.eval()
         if str(getattr(self.video_expert, "video_attention_mask_mode", "")) != "first_frame_causal":
@@ -2313,6 +3119,13 @@ class LightWAM(torch.nn.Module):
                 input_image=input_image,
                 tiled=tiled,
             )
+            history_latents, history_valid_mask = self._prepare_inference_history_latents(
+                history_images=history_images,
+                current_latents=first_frame_latents,
+                tiled=tiled,
+                history_video_latents=history_video_latents,
+                history_valid_mask=history_valid_mask,
+            )
             fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
 
             use_prompt = prompt is not None
@@ -2350,9 +3163,16 @@ class LightWAM(torch.nn.Module):
                 context=context,
                 context_mask=context_mask,
                 fuse_vae_embedding_in_latents=fuse_flag,
+                history_latents=history_latents,
+                history_valid_mask=history_valid_mask,
             )
             return {
                 "action": pred_action[0].detach().to(device="cpu", dtype=torch.float32),
+                # The rollout memory owns this independent T=1 latent after a
+                # successful inference, avoiding repeated history VAE encoding.
+                "observation_latent": first_frame_latents[0, :, 0]
+                .detach()
+                .to(device="cpu", dtype=torch.float32),
             }
 
         generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
@@ -2468,6 +3288,7 @@ class LightWAM(torch.nn.Module):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        history_images: Optional[torch.Tensor] = None,
     ) -> dict[str, Any]:
         del negative_prompt, text_cfg_scale
 
@@ -2511,6 +3332,11 @@ class LightWAM(torch.nn.Module):
             input_image=input_image,
             tiled=tiled,
         )
+        history_latents, history_valid_mask = self._prepare_inference_history_latents(
+            history_images=history_images,
+            current_latents=first_frame_latents,
+            tiled=tiled,
+        )
         self._benchmark_sync_device()
         timings_s["vae_encode"] = float(time.perf_counter() - vae_start)
 
@@ -2541,18 +3367,35 @@ class LightWAM(torch.nn.Module):
                 context=prepared_context,
                 context_mask=prepared_context_mask,
                 fuse_vae_embedding_in_latents=fuse_flag,
+                frame_position_offset=0,
             )
+            backbone_pre = video_pre
+            current_token_slice = slice(0, int(video_pre["tokens"].shape[1]))
+            if history_latents is not None:
+                history_pre = self._build_history_video_pre(
+                    history_latents=history_latents,
+                    context=prepared_context,
+                    context_mask=prepared_context_mask,
+                    spatial_position_scale=self.video_latent_spatial_downsample_factor,
+                )
+                backbone_pre, current_token_slice = self._merge_history_and_main_pre(
+                    history_pre=history_pre,
+                    main_pre=video_pre,
+                    history_valid_mask=history_valid_mask,
+                )
             self._benchmark_sync_device()
             timings_s["model_prepare_observation"] = float(time.perf_counter() - prepare_start)
 
             backbone_start = time.perf_counter()
-            _ = self.video_expert.forward_backbone(video_pre)
+            _ = self.video_expert.forward_backbone(backbone_pre)
             self._benchmark_sync_device()
             timings_s["model_action_backbone"] = float(time.perf_counter() - backbone_start)
 
             head_start = time.perf_counter()
             pred_action = self.state_fusion_action_expert(
-                self._build_multilayer_action_fusion_inputs(),
+                self._build_multilayer_action_fusion_inputs(
+                    video_token_slice=current_token_slice
+                ),
                 action_horizon=action_horizon,
             )
             self._benchmark_sync_device()
@@ -2662,6 +3505,7 @@ class LightWAM(torch.nn.Module):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        history_images: Optional[torch.Tensor] = None,
     ):
         return self.infer_joint(
             prompt=prompt,
@@ -2679,6 +3523,7 @@ class LightWAM(torch.nn.Module):
             seed=seed,
             rand_device=rand_device,
             tiled=tiled,
+            history_images=history_images,
         )
 
     def save_checkpoint(self, path, optimizer=None, step=None):
@@ -2691,6 +3536,11 @@ class LightWAM(torch.nn.Module):
             payload["state_fusion_action_expert"] = self.state_fusion_action_expert.state_dict()
         if self.proprio_encoder is not None:
             payload["proprio_encoder"] = self.proprio_encoder.state_dict()
+        if self.history_enabled:
+            payload["history_memory_embeddings"] = {
+                "slot": self.history_slot_embedding.state_dict(),
+                "role": self.history_role_embedding.state_dict(),
+            }
         if optimizer is not None:
             payload["optimizer"] = optimizer.state_dict()
         torch.save(payload, path)
@@ -2787,6 +3637,27 @@ class LightWAM(torch.nn.Module):
         elif "state_fusion_action_expert" in payload:
             logger.warning(
                 "Checkpoint contains `state_fusion_action_expert` weights but current model does not enable it; ignoring."
+            )
+
+        if self.history_enabled:
+            history_embedding_state = payload.get("history_memory_embeddings")
+            if history_embedding_state is None:
+                logger.warning(
+                    "Checkpoint has no history slot/type embeddings; keeping zero initialization. "
+                    "This is expected when starting memory post-training from a no-memory checkpoint."
+                )
+            else:
+                if not isinstance(history_embedding_state, dict):
+                    raise TypeError("`history_memory_embeddings` must be a dict.")
+                self.history_slot_embedding.load_state_dict(
+                    history_embedding_state["slot"], strict=True
+                )
+                self.history_role_embedding.load_state_dict(
+                    history_embedding_state["role"], strict=True
+                )
+        elif "history_memory_embeddings" in payload:
+            logger.warning(
+                "Checkpoint contains history embeddings but current model has memory disabled; ignoring."
             )
 
         if optimizer is not None and "optimizer" in payload:

@@ -82,6 +82,22 @@ class Wan22Trainer:
         self.timing_breakdown_enabled = bool(timing_cfg.get("enabled", False))
         self.timing_breakdown_sync_cuda = bool(timing_cfg.get("sync_cuda", True))
         self._timing_accumulator: dict[str, float] = {}
+        memory_monitor_cfg = cfg.get("memory_monitor", {}) or {}
+        self.memory_monitor_enabled = bool(memory_monitor_cfg.get("enabled", False))
+        self.memory_shuffled_probe_every = int(
+            memory_monitor_cfg.get("shuffled_probe_every", 0)
+        )
+        self.memory_probe_batch_size = int(memory_monitor_cfg.get("probe_batch_size", 2))
+        if self.memory_shuffled_probe_every < 0:
+            raise ValueError("`memory_monitor.shuffled_probe_every` must be non-negative.")
+        if self.memory_probe_batch_size < 2:
+            raise ValueError("`memory_monitor.probe_batch_size` must be at least 2.")
+        if self.memory_monitor_enabled and not bool(getattr(self.model, "history_enabled", False)):
+            logger.warning("Memory monitoring requested while history memory is disabled; disabling monitor.")
+            self.memory_monitor_enabled = False
+        self._memory_gradient_accumulator: dict[
+            str, tuple[torch.Tensor, torch.Tensor]
+        ] = {}
         train_vis_cfg = cfg.get("train_visualization", {})
         self.train_visualization_enabled = bool(train_vis_cfg.get("enabled", False))
         self.train_visualization_every = int(train_vis_cfg.get("every", 0))
@@ -169,6 +185,12 @@ class Wan22Trainer:
             "Timing breakdown: enabled=%s sync_cuda=%s",
             self.timing_breakdown_enabled,
             self.timing_breakdown_sync_cuda,
+        )
+        logger.info(
+            "Memory monitor: enabled=%s shuffled_probe_every=%d probe_batch_size=%d",
+            self.memory_monitor_enabled,
+            self.memory_shuffled_probe_every,
+            self.memory_probe_batch_size,
         )
         logger.info(
             "Train visualization: enabled=%s every=%d fps=%d tiled=%s action_fit_enabled=%s action_fit_num_steps=%s",
@@ -281,6 +303,8 @@ class Wan22Trainer:
                 enabled=self.timing_breakdown_enabled,
                 sync_cuda=self.timing_breakdown_sync_cuda,
             )
+        if hasattr(prepared_model, "set_memory_gradient_monitoring"):
+            prepared_model.set_memory_gradient_monitoring(self.memory_monitor_enabled)
         self.wandb_run = None
         self._init_wandb()
         self._resume_after_prepare()
@@ -796,6 +820,136 @@ class Wan22Trainer:
         self._timing_accumulator.clear()
         return metrics
 
+    def _accumulate_memory_gradient_stats(
+        self,
+        stats: dict[str, tuple[torch.Tensor, torch.Tensor]],
+    ) -> None:
+        if not self.memory_monitor_enabled:
+            return
+        for key, (value_sum, value_count) in stats.items():
+            value_sum = value_sum.detach()
+            value_count = value_count.detach()
+            previous = self._memory_gradient_accumulator.get(key)
+            if previous is None:
+                self._memory_gradient_accumulator[key] = (value_sum, value_count)
+            else:
+                self._memory_gradient_accumulator[key] = (
+                    previous[0] + value_sum,
+                    previous[1] + value_count,
+                )
+
+    def _consume_global_memory_gradient_metrics(self) -> dict[str, float]:
+        local_stats = self._memory_gradient_accumulator
+        self._memory_gradient_accumulator = {}
+        metrics: dict[str, float] = {}
+        for key in sorted(local_stats):
+            value_sum, value_count = local_stats[key]
+            pair = torch.stack(
+                [
+                    value_sum.to(device=self.accelerator.device, dtype=torch.float32),
+                    value_count.to(device=self.accelerator.device, dtype=torch.float32),
+                ]
+            )
+            gathered = self.accelerator.gather(pair).reshape(-1, 2)
+            global_sum = gathered[:, 0].sum()
+            global_count = gathered[:, 1].sum()
+            if float(global_count.item()) > 0.0:
+                metrics[f"mem/{key}"] = float((global_sum / global_count).item())
+
+        for branch in ("video", "action"):
+            history_key = f"mem/{branch}/history_grad_rms"
+            current_key = f"mem/{branch}/current_grad_rms"
+            if history_key in metrics and current_key in metrics:
+                metrics[f"mem/{branch}/history_to_current_grad_ratio"] = (
+                    metrics[history_key] / max(metrics[current_key], 1e-12)
+                )
+        return metrics
+
+    @staticmethod
+    def _build_shuffled_history_sample(sample: dict) -> dict | None:
+        history_key = None
+        for candidate in ("history_video", "history_video_latents"):
+            value = sample.get(candidate)
+            if isinstance(value, torch.Tensor):
+                history_key = candidate
+                break
+        history_valid_mask = sample.get("history_valid_mask")
+        if history_key is None or not isinstance(history_valid_mask, torch.Tensor):
+            return None
+        history = sample[history_key]
+        if history.ndim == 0 or int(history.shape[0]) < 2:
+            return None
+
+        shuffled = dict(sample)
+        shuffled[history_key] = history.roll(shifts=1, dims=0)
+        shuffled["history_valid_mask"] = history_valid_mask.roll(shifts=1, dims=0)
+        return shuffled
+
+    def _memory_probe_forward(self, train_model, sample: dict, seed: int):
+        cuda_devices = []
+        if self.accelerator.device.type == "cuda":
+            cuda_devices = [
+                self.accelerator.device.index
+                if self.accelerator.device.index is not None
+                else torch.cuda.current_device()
+            ]
+        with torch.random.fork_rng(devices=cuda_devices):
+            torch.manual_seed(int(seed))
+            if cuda_devices:
+                torch.cuda.manual_seed_all(int(seed))
+            with torch.no_grad(), self.accelerator.autocast():
+                loss, loss_dict = train_model.training_loss(sample)
+        return float(loss.detach().float().item()), loss_dict
+
+    def _maybe_run_memory_shuffled_probe(self, train_model, sample: dict) -> dict[str, float]:
+        if not self.memory_monitor_enabled or self.benchmark_enabled:
+            return {}
+        if self.memory_shuffled_probe_every <= 0:
+            return {}
+        if self.global_step % self.memory_shuffled_probe_every != 0:
+            return {}
+
+        probe_sample = self._slice_sample_batch(sample, batch_size=self.memory_probe_batch_size)
+        shuffled_sample = self._build_shuffled_history_sample(probe_sample)
+        if shuffled_sample is None:
+            return {}
+
+        probe_seed = self.seed + self.global_step * 1009
+        correct_total, correct_losses = self._memory_probe_forward(
+            train_model,
+            probe_sample,
+            probe_seed,
+        )
+        shuffled_total, shuffled_losses = self._memory_probe_forward(
+            train_model,
+            shuffled_sample,
+            probe_seed,
+        )
+        local_metrics = {
+            "mem/probe/total_loss_correct": correct_total,
+            "mem/probe/total_loss_shuffled": shuffled_total,
+            "mem/probe/total_loss_gap": shuffled_total - correct_total,
+            "mem/probe/video_loss_correct": float(correct_losses["loss_video_raw"]),
+            "mem/probe/video_loss_shuffled": float(shuffled_losses["loss_video_raw"]),
+            "mem/probe/video_loss_gap": float(
+                shuffled_losses["loss_video_raw"] - correct_losses["loss_video_raw"]
+            ),
+            "mem/probe/action_loss_correct": float(correct_losses["loss_action_raw"]),
+            "mem/probe/action_loss_shuffled": float(shuffled_losses["loss_action_raw"]),
+            "mem/probe/action_loss_gap": float(
+                shuffled_losses["loss_action_raw"] - correct_losses["loss_action_raw"]
+            ),
+        }
+        global_metrics = {}
+        for key, value in local_metrics.items():
+            value_tensor = torch.tensor(
+                value,
+                device=self.accelerator.device,
+                dtype=torch.float32,
+            ).reshape(1)
+            global_metrics[key] = float(self.accelerator.gather(value_tensor).mean().item())
+        return global_metrics
+
     @staticmethod
     def _format_timing_log_line(metrics: dict[str, float]) -> str:
         ordered_keys = [
@@ -820,6 +974,41 @@ class Wan22Trainer:
             if key not in ordered_keys:
                 parts.append(f"{key.split('/')[-1]}={metrics[key]:.1f}ms")
         return " ".join(parts)
+
+    @staticmethod
+    def _build_eval_log(
+        global_step: int,
+        metrics: dict[str, object],
+    ) -> tuple[str, dict[str, float]]:
+        """Format validation output for either raw-video or latent-only eval."""
+        description = "[eval] step=%d val_loss=%.4f" % (
+            int(global_step),
+            float(metrics["val_loss"]),
+        )
+        if "psnr_rd" in metrics and "ssim_rd" in metrics:
+            description += " infer_psnr=%.4f infer_ssim=%.4f" % (
+                float(metrics["psnr_rd"]),
+                float(metrics["ssim_rd"]),
+            )
+        if "action_l2" in metrics:
+            description += " action_l2=%.4f" % float(metrics["action_l2"])
+        if "action_l1" in metrics:
+            description += " action_l1=%.4f" % float(metrics["action_l1"])
+
+        payload = {"eval/val_loss": float(metrics["val_loss"])}
+        for metric_key in (
+            "psnr_rg",
+            "ssim_rg",
+            "psnr_rd",
+            "ssim_rd",
+            "psnr_dg",
+            "ssim_dg",
+            "action_l2",
+            "action_l1",
+        ):
+            if metric_key in metrics:
+                payload[f"eval/{metric_key}"] = float(metrics[metric_key])
+        return description, payload
 
     def _assert_dataset_length_consistent(self, dataset, dataset_name: str):
         if not hasattr(dataset, "__len__"):
@@ -1045,12 +1234,53 @@ class Wan22Trainer:
 
     @staticmethod
     def _to_batched_eval_sample(sample):
-        video = sample["video"]
+        video = sample.get("video")
+        video_latents = sample.get("video_latents")
         prompt = sample["prompt"]
         action = sample.get("action", None)
         proprio = sample.get("proprio", None)
         context = sample.get("context", None)
         context_mask = sample.get("context_mask", None)
+
+        if video is None and video_latents is None:
+            raise KeyError("Evaluation sample requires `video` or `video_latents`.")
+        if video is None:
+            if not isinstance(video_latents, torch.Tensor):
+                raise TypeError(
+                    f"Expected tensor video latents for evaluation, got {type(video_latents)}."
+                )
+            if video_latents.ndim == 4:
+                video_latents = video_latents.unsqueeze(0)
+            if video_latents.ndim != 5:
+                raise ValueError(
+                    "Expected video_latents [C,T,H,W] or [B,C,T,H,W], got "
+                    f"{tuple(video_latents.shape)}."
+                )
+            batched = dict(sample)
+            batched["video_latents"] = video_latents
+            tensor_batch_dims = {
+                "action": 2,
+                "proprio": 2,
+                "context": 2,
+                "context_mask": 1,
+                "image_is_pad": 1,
+                "action_is_pad": 1,
+                "proprio_is_pad": 1,
+                "history_video_latents": 4,
+                "history_valid_mask": 1,
+            }
+            for key, unbatched_ndim in tensor_batch_dims.items():
+                value = batched.get(key)
+                if isinstance(value, torch.Tensor) and value.ndim == unbatched_ndim:
+                    batched[key] = value.unsqueeze(0)
+            if isinstance(prompt, str):
+                batched["prompt"] = [prompt]
+            elif isinstance(prompt, tuple):
+                batched["prompt"] = list(prompt)
+            batched["action_horizon"] = (
+                None if batched.get("action") is None else int(batched["action"].shape[1])
+            )
+            return batched
 
         if not isinstance(video, torch.Tensor):
             raise TypeError(
@@ -1112,7 +1342,7 @@ class Wan22Trainer:
                     f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
                 )
 
-        return {
+        output = {
             "video": video,
             "prompt": prompt,
             "action": action,
@@ -1121,6 +1351,20 @@ class Wan22Trainer:
             "context_mask": context_mask,
             "action_horizon": action_horizon,
         }
+        for key, unbatched_ndim in (
+            ("image_is_pad", 1),
+            ("action_is_pad", 1),
+            ("proprio_is_pad", 1),
+            ("history_video", 4),
+            ("history_video_latents", 4),
+            ("history_valid_mask", 1),
+        ):
+            value = sample.get(key)
+            if isinstance(value, torch.Tensor) and value.ndim == unbatched_ndim:
+                value = value.unsqueeze(0)
+            if value is not None:
+                output[key] = value
+        return output
 
     @torch.no_grad()
     def evaluate(self):
@@ -1128,7 +1372,12 @@ class Wan22Trainer:
             return None
 
         model = self.accelerator.unwrap_model(self.model)
-        was_dit_training = model.dit.training
+        # Adapter training keeps the wrapper/MoT parent in eval while selected
+        # video modules train. Preserve that selective state across validation.
+        was_dit_training = bool(
+            model.dit.training
+            or getattr(getattr(model, "video_expert", None), "training", False)
+        )
         model.eval()
 
         # eval_index = (self.global_step + self.accelerator.process_index) % len(self.val_dataset)
@@ -1140,6 +1389,21 @@ class Wan22Trainer:
         with self.accelerator.autocast():
             val_loss, _ = model.training_loss(sample)
             val_loss = val_loss.float().item()
+
+        # Episode-packed memory validation intentionally avoids duplicating raw
+        # images beside cached latents. Report the exact validation objective;
+        # closed-loop RMBench evaluation remains the source of rollout metrics.
+        if "video" not in sample:
+            gathered_val = self.accelerator.gather_for_metrics(
+                torch.tensor(
+                    [val_loss],
+                    device=self.accelerator.device,
+                    dtype=torch.float32,
+                )
+            )
+            if was_dit_training:
+                self._set_dit_only_train_mode()
+            return {"val_loss": float(gathered_val.mean().item())}
         
         prompt = sample["prompt"][0]
         video0 = sample["video"][0] # Tensor [3, T, H, W] in (-1, 1)
@@ -1548,6 +1812,13 @@ class Wan22Trainer:
                 self._accumulate_timing(
                     {"timing/trainer/backward_ms": self._timing_end_ms(backward_start)}
                 )
+                if self.memory_monitor_enabled and hasattr(
+                    unwrapped_model,
+                    "pop_memory_gradient_stats",
+                ):
+                    self._accumulate_memory_gradient_stats(
+                        unwrapped_model.pop_memory_gradient_stats()
+                    )
 
                 if self.accelerator.sync_gradients:
                     optimizer_start = self._timing_start()
@@ -1570,6 +1841,7 @@ class Wan22Trainer:
                         )
                     grad_norm_tensor = torch.tensor(grad_norm, device=loss.device, dtype=torch.float32)
                     global_grad_norm = float(self.accelerator.gather(grad_norm_tensor).mean().item())
+                    global_memory_metrics = self._consume_global_memory_gradient_metrics()
                     timing_metrics = self._consume_timing_metrics()
                     if timing_metrics:
                         trainer_total_ms = sum(
@@ -1586,6 +1858,11 @@ class Wan22Trainer:
                         )
 
                     current_lr = float(self.optimizer.param_groups[0]["lr"])
+                    memory_probe_metrics = self._maybe_run_memory_shuffled_probe(
+                        train_model,
+                        sample,
+                    )
+                    global_memory_metrics.update(memory_probe_metrics)
 
                     if (
                         self.benchmark_enabled
@@ -1618,6 +1895,20 @@ class Wan22Trainer:
                                 self.global_step,
                                 self._format_timing_log_line(global_timing_metrics),
                             )
+                        if global_memory_metrics:
+                            summary_keys = (
+                                "mem/video/history_to_current_grad_ratio",
+                                "mem/action/history_to_current_grad_ratio",
+                                "mem/probe/video_loss_gap",
+                                "mem/probe/action_loss_gap",
+                            )
+                            summary = " ".join(
+                                f"{key.split('/')[-2]}_{key.split('/')[-1]}={global_memory_metrics[key]:.4e}"
+                                for key in summary_keys
+                                if key in global_memory_metrics
+                            )
+                            if summary:
+                                logger.info("[mem] step=%d %s", self.global_step, summary)
 
                         wandb_payload = {
                             "train/loss": global_loss,
@@ -1630,7 +1921,10 @@ class Wan22Trainer:
                             wandb_payload[f"train/{key}"] = value
                         for key, value in global_timing_metrics.items():
                             wandb_payload[key] = value
+                        wandb_payload.update(global_memory_metrics)
                         self._wandb_log(wandb_payload)
+                    elif memory_probe_metrics and self.accelerator.is_main_process:
+                        self._wandb_log(memory_probe_metrics)
 
                     self._maybe_start_benchmark_window()
 
@@ -1650,16 +1944,10 @@ class Wan22Trainer:
                         metrics = self.evaluate()
                         self.accelerator.wait_for_everyone()
                         if metrics is not None and self.accelerator.is_main_process:
-                            description = "[eval] step=%d val_loss=%.4f infer_psnr=%.4f infer_ssim=%.4f" % (
+                            description, eval_payload = self._build_eval_log(
                                 self.global_step,
-                                metrics["val_loss"],
-                                metrics["psnr_rd"],
-                                metrics["ssim_rd"],
+                                metrics,
                             )
-                            if "action_l2" in metrics:
-                                description += " action_l2=%.4f" % metrics["action_l2"]
-                            if "action_l1" in metrics:
-                                description += " action_l1=%.4f" % metrics["action_l1"]
                             logger.info(description)
                             if metrics.get("action_fit_path") is not None:
                                 logger.info(
@@ -1667,19 +1955,6 @@ class Wan22Trainer:
                                     self.global_step,
                                     metrics["action_fit_path"],
                                 )
-                            eval_payload = {
-                                "eval/val_loss": float(metrics["val_loss"]),
-                                "eval/psnr_rg": float(metrics["psnr_rg"]),
-                                "eval/ssim_rg": float(metrics["ssim_rg"]),
-                                "eval/psnr_rd": float(metrics["psnr_rd"]),
-                                "eval/ssim_rd": float(metrics["ssim_rd"]),
-                                "eval/psnr_dg": float(metrics["psnr_dg"]),
-                                "eval/ssim_dg": float(metrics["ssim_dg"]),
-                            }
-                            if "action_l2" in metrics:
-                                eval_payload["eval/action_l2"] = float(metrics["action_l2"])
-                            if "action_l1" in metrics:
-                                eval_payload["eval/action_l1"] = float(metrics["action_l1"])
                             self._wandb_log(eval_payload)
 
                     if self.save_every > 0 and self.global_step % self.save_every == 0:

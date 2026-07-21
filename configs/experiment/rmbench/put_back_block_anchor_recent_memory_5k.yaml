@@ -1,0 +1,89 @@
+# @package _global_
+
+defaults:
+  - override /task: rmbench_anchor_recent_memory_3cam_384_1e-4
+  - _self_
+
+experiment:
+  name: rmbench_pbb_anchor4_recent4to8_5k
+  task_name: put_back_block
+  policy_memory: anchor_recent_raw_observation
+  evaluation_profile: sim_rmbench_put_back_block_anchor_recent_memory_5k
+  action_horizon: 32
+  trained_action_prefix: 24
+  evaluation_replan_steps: 24
+
+launcher:
+  gpu_ids: [0, 1, 2, 3]
+  num_processes: 4
+  main_process_port: 29579
+  accelerate_config_file: ./scripts/accelerate_configs/accelerate_zero1_ds.yaml
+  expected_global_batch_size: 32
+
+# Start from the completed task-adapted 5k no-memory checkpoint. Override with
+# `resume=/path/to/step_005000.pt` if that run is moved.
+resume: ./runs/rmbench_no_memory/put_back_block/r460k_5k/2026-07-21_12-25-24/checkpoints/weights/step_005000.pt
+output_dir: ./runs/rmbench_anchor_recent_memory/put_back_block/no_mem_5k_to_memory_5k/${now:%Y-%m-%d_%H-%M-%S}
+
+# 4 processes * micro-batch 2 * accumulation 4 = global batch 32.
+batch_size: 2
+num_workers: 8
+gradient_accumulation_steps: 4
+
+learning_rate: 1.0e-4
+lr_scheduler_type: cosine
+warmup_steps: 1000
+max_steps: 5000
+num_epochs: 100
+save_every: 1000
+eval_every: 500
+weight_decay: 1.0e-2
+
+memory_monitor:
+  enabled: true
+  shuffled_probe_every: 500
+  probe_batch_size: 2
+
+wandb:
+  enabled: true
+  project: RMBench_post-train
+  name: pbb-a4-r4to8-5k-s${seed}-${now:%m%d-%H%M}
+  group: pbb-anchor-recent-memory
+  mode: online
+
+model:
+  history_memory:
+    enabled: true
+    min_size: 8
+    max_size: 12
+    raw_stride: 4
+    anchor_size: 4
+    anchor_stride: 4
+    recent_min_size: 4
+    recent_max_size: 8
+    recent_stride: 4
+  loss:
+    action_temporal_weighting:
+      enabled: true
+      num_prefix_steps: 24
+      prefix_weight: 1.0
+      tail_weight: 0.0
+
+data:
+  train:
+    dataset_dirs:
+      - ./data/rmbench/tasks/put_back_block
+    num_frames: 33
+    val_set_proportion: 0.10
+    pretrained_norm_stats: ./data/rmbench/tasks/put_back_block/dataset_stats_train.json
+    text_embedding_cache_dir: ./data/text_embeds_cache/rmbench
+    use_latent_cache: true
+    latent_cache_dir: ./data/latent_cache_Wan2.1-T2V-1.3B/rmbench_tasks/put_back_block_anchor_recent_memory_episode_packed_train
+  val:
+    dataset_dirs: ${data.train.dataset_dirs}
+    num_frames: ${data.train.num_frames}
+    val_set_proportion: ${data.train.val_set_proportion}
+    pretrained_norm_stats: ${data.train.pretrained_norm_stats}
+    text_embedding_cache_dir: ${data.train.text_embedding_cache_dir}
+    use_latent_cache: true
+    latent_cache_dir: ./data/latent_cache_Wan2.1-T2V-1.3B/rmbench_tasks/put_back_block_anchor_recent_memory_episode_packed_val

@@ -46,12 +46,22 @@ def _canonical_data_train_meta(data_train_cfg: dict[str, Any] | None) -> dict[st
         [
             "_target_",
             "dataset_dirs",
+            "is_training_set",
+            "val_set_proportion",
             "num_frames",
             "global_sample_stride",
             "action_video_freq_ratio",
             "video_size",
             "camera_key",
             "concat_multi_camera",
+            "history_enabled",
+            "history_max_size",
+            "history_raw_stride",
+            "history_anchor_size",
+            "history_anchor_stride",
+            "history_recent_min_size",
+            "history_recent_max_size",
+            "history_recent_stride",
         ],
     )
 

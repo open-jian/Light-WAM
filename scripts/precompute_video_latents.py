@@ -1,3 +1,5 @@
+import ctypes
+import gc
 import json
 import inspect
 import logging
@@ -27,6 +29,44 @@ from lightwam.utils.logging_config import get_logger, setup_logging
 
 register_default_resolvers()
 logger = get_logger(__name__)
+
+
+try:
+    _malloc_trim = ctypes.CDLL(None).malloc_trim
+    _malloc_trim.argtypes = [ctypes.c_size_t]
+    _malloc_trim.restype = ctypes.c_int
+except (AttributeError, OSError):
+    _malloc_trim = None
+
+
+def _release_episode_precompute_memory() -> None:
+    """Return large per-episode CPU/GPU buffers before loading the next episode."""
+    gc.collect()
+    if _malloc_trim is not None:
+        _malloc_trim(0)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _validate_existing_memory_cache_meta(
+    *,
+    meta_path: Path,
+    expected_meta: dict,
+) -> None:
+    """Reject resume when an existing memory cache belongs to another split/config."""
+    if not meta_path.is_file():
+        raise FileNotFoundError(
+            "Existing memory latent cache has no meta.json and cannot be safely resumed: "
+            f"{meta_path}. Use a new cache directory or OVERWRITE=true."
+        )
+    with meta_path.open("r", encoding="utf-8") as meta_file:
+        existing_meta = json.load(meta_file)
+    if existing_meta != expected_meta:
+        raise ValueError(
+            "Existing memory latent cache metadata does not match the requested "
+            f"dataset split/config: {meta_path}. Use a new cache directory or "
+            "OVERWRITE=true."
+        )
 
 
 def _init_distributed():
@@ -192,6 +232,113 @@ def _build_video_only_model(model_cfg: DictConfig, model_dtype: torch.dtype, dev
     )
 
 
+def _encode_independent_history_latents(
+    *,
+    model,
+    history_video: torch.Tensor,
+    history_valid_mask: torch.Tensor,
+    tiled: bool,
+    cache_dtype: torch.dtype,
+    encode_batch_size: int,
+) -> torch.Tensor:
+    """Encode every history observation as its own T=1 VAE input."""
+    if not isinstance(history_video, torch.Tensor) or history_video.ndim != 5:
+        raise ValueError(
+            "Expected `history_video` [B,3,H,height,width], got "
+            f"{type(history_video)} / "
+            f"{None if not isinstance(history_video, torch.Tensor) else tuple(history_video.shape)}."
+        )
+    batch_size, channels, history_size, height, width = history_video.shape
+    if channels != 3 or history_size <= 0:
+        raise ValueError(f"Invalid history video shape: {tuple(history_video.shape)}.")
+    history_valid_mask = torch.as_tensor(history_valid_mask, dtype=torch.bool)
+    if history_valid_mask.shape != (batch_size, history_size):
+        raise ValueError(
+            "History mask shape mismatch: "
+            f"got {tuple(history_valid_mask.shape)}, expected {(batch_size, history_size)}."
+        )
+    if encode_batch_size <= 0:
+        raise ValueError(f"`encode_batch_size` must be positive, got {encode_batch_size}.")
+
+    flat_frames = history_video.permute(0, 2, 1, 3, 4).reshape(
+        batch_size * history_size,
+        channels,
+        1,
+        height,
+        width,
+    )
+    chunks = []
+    for start in range(0, int(flat_frames.shape[0]), encode_batch_size):
+        frame_chunk = flat_frames[start : start + encode_batch_size].to(
+            device=model.device,
+            dtype=model.torch_dtype,
+            non_blocking=True,
+        )
+        latent_chunk = model._encode_video_latents(frame_chunk, tiled=tiled)
+        if latent_chunk.ndim != 5 or int(latent_chunk.shape[2]) != 1:
+            raise ValueError(
+                "Independent T=1 history encoding must produce [N,C,1,h,w], "
+                f"got {tuple(latent_chunk.shape)}."
+            )
+        chunks.append(latent_chunk.detach().to(device="cpu", dtype=cache_dtype))
+
+    flat_latents = torch.cat(chunks, dim=0)[:, :, 0]
+    history_latents = flat_latents.reshape(
+        batch_size,
+        history_size,
+        flat_latents.shape[1],
+        flat_latents.shape[2],
+        flat_latents.shape[3],
+    ).permute(0, 2, 1, 3, 4).contiguous()
+    history_latents = history_latents.masked_fill(
+        ~history_valid_mask[:, None, :, None, None],
+        0,
+    )
+    return history_latents
+
+
+def _build_history_from_episode_main_latents(
+    *,
+    video_latents: torch.Tensor,
+    sample_indices: list[int],
+    episode_sample_start: int,
+    episode_sample_end: int,
+    history_frame_offsets: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reuse each earlier sample's causal first latent as its exact T=1 latent."""
+    if video_latents.ndim != 5 or int(video_latents.shape[2]) < 1:
+        raise ValueError(
+            f"`video_latents` must be [N,C,T,h,w] with T>=1, got {tuple(video_latents.shape)}."
+        )
+    expected_indices = list(range(int(episode_sample_start), int(episode_sample_end)))
+    if sample_indices != expected_indices:
+        raise ValueError(
+            "Episode history assembly requires the complete episode in sample order. "
+            "A partially cached episode must be removed and recomputed."
+        )
+    if int(video_latents.shape[0]) != len(expected_indices):
+        raise ValueError(
+            f"Episode latent count mismatch: {video_latents.shape[0]} vs {len(expected_indices)}."
+        )
+    offsets = torch.as_tensor(history_frame_offsets, dtype=torch.int64)
+    if offsets.ndim != 1 or offsets.numel() == 0 or bool((offsets >= 0).any().item()):
+        raise ValueError(f"History offsets must be a non-empty negative sequence, got {history_frame_offsets}.")
+
+    episode_size = len(expected_indices)
+    local_indices = torch.arange(episode_size, dtype=torch.int64)
+    source_indices = local_indices[:, None] + offsets[None, :]
+    history_valid_mask = source_indices >= 0
+    clamped_sources = source_indices.clamp(min=0, max=episode_size - 1)
+    first_latents = video_latents[:, :, 0]
+    gathered = first_latents[clamped_sources]
+    history_latents = gathered.permute(0, 2, 1, 3, 4).contiguous()
+    history_latents = history_latents.masked_fill(
+        ~history_valid_mask[:, None, :, None, None],
+        0,
+    )
+    return history_latents, history_valid_mask.contiguous()
+
+
 def _merge_indexed_cache_manifests(
     *,
     latent_cache_dir: Path,
@@ -290,6 +437,11 @@ def _validate_index_payload(
             f"Latent cache index storage format mismatch in {index_path}: "
             f"expected {storage_format}, got {index_payload.get('storage_format')}"
         )
+    if int(index_payload.get("num_samples", -1)) != int(total_samples):
+        raise ValueError(
+            f"Latent cache index num_samples mismatch in {index_path}: "
+            f"expected {total_samples}, got {index_payload.get('num_samples')}."
+        )
     sample_to_shard = index_payload.get("sample_to_shard")
     sample_to_offset = index_payload.get("sample_to_offset")
     shard_paths = index_payload.get("shard_paths")
@@ -360,6 +512,29 @@ def _rebuild_index_from_cache_files(
                 f"Shard entry count mismatch in {cache_path}: "
                 f"sample_indices={num_entries}, video_latents={video_latents.shape[0]}."
             )
+        history_video_latents = payload.get("history_video_latents")
+        history_valid_mask = payload.get("history_valid_mask")
+        if (history_video_latents is None) != (history_valid_mask is None):
+            raise ValueError(
+                f"Shard must contain both history fields or neither: {cache_path}."
+            )
+        if history_video_latents is not None:
+            if not isinstance(history_video_latents, torch.Tensor) or history_video_latents.ndim != 5:
+                raise ValueError(
+                    "`history_video_latents` must be [N,C,H,h,w] in "
+                    f"{cache_path}, got {getattr(history_video_latents, 'shape', None)}."
+                )
+            if not isinstance(history_valid_mask, torch.Tensor) or history_valid_mask.ndim != 2:
+                raise ValueError(
+                    "`history_valid_mask` must be [N,H] in "
+                    f"{cache_path}, got {getattr(history_valid_mask, 'shape', None)}."
+                )
+            if (
+                int(history_video_latents.shape[0]) != num_entries
+                or int(history_valid_mask.shape[0]) != num_entries
+                or int(history_video_latents.shape[2]) != int(history_valid_mask.shape[1])
+            ):
+                raise ValueError(f"History cache shape mismatch in {cache_path}.")
         if bool((sample_indices < 0).any().item()) or bool((sample_indices >= int(total_samples)).any().item()):
             raise ValueError(
                 f"Shard {cache_path} contains sample index outside [0, {total_samples})."
@@ -524,6 +699,20 @@ def main(cfg: DictConfig):
     precompute_video_only = bool(cfg.get("precompute_video_only", False))
     if storage_format == "episode_packed_v1":
         precompute_video_only = True
+    precompute_history_cfg = cfg.get("precompute_history")
+    precompute_history = (
+        bool(dataset_cfg.get("history_enabled", False))
+        if precompute_history_cfg is None
+        else bool(precompute_history_cfg)
+    )
+    if precompute_history and not precompute_video_only:
+        raise ValueError("History latent precompute requires `precompute_video_only=true`.")
+    if precompute_history and int(dataset_cfg.get("history_anchor_size", 0)) > 0:
+        if storage_format != "episode_packed_v1":
+            raise ValueError(
+                "Anchor+recent memory requires `precompute_storage_format=episode_packed_v1` "
+                "so episode-start observations can be addressed without duplicated latents."
+            )
     shard_size = int(cfg.get("precompute_shard_size", 128))
     precompute_timing_cfg = cfg.get("precompute_timing", {})
     precompute_timing_enabled = bool(precompute_timing_cfg.get("enabled", False))
@@ -540,17 +729,80 @@ def main(cfg: DictConfig):
     total_episodes = int(dataset.get_num_episodes()) if hasattr(dataset, "get_num_episodes") else 0
 
     precompute_batch_size = int(cfg.get("precompute_batch_size", cfg.batch_size))
+    history_encode_batch_size = int(
+        cfg.get("precompute_history_encode_batch_size", precompute_batch_size)
+    )
     precompute_num_workers = int(cfg.get("precompute_num_workers", cfg.num_workers))
     overwrite = bool(cfg.get("overwrite", False))
     precompute_resume = bool(cfg.get("precompute_resume", False))
     if overwrite and precompute_resume:
         raise ValueError("`precompute_resume=true` is incompatible with `overwrite=true`.")
     tiled = bool(cfg.get("precompute_tiled", False))
+    mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
+    model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
+    cache_dtype = _resolve_precompute_cache_dtype(
+        cfg.get("precompute_cache_dtype", "model"),
+        model_dtype=model_dtype,
+    )
+
+    format_name = {
+        "single_file_v1": "lightwam_video_latent_cache_v1",
+        "sharded_v1": "lightwam_video_latent_cache_sharded_v1",
+        "episode_packed_v1": "lightwam_video_latent_cache_episode_packed_v1",
+    }[storage_format]
+    expected_meta = build_canonical_video_latent_meta_payload(
+        format_name=format_name,
+        storage_format=storage_format,
+        video_only=precompute_video_only,
+        shard_size=(shard_size if storage_format == "sharded_v1" else None),
+        cache_dtype=str(cache_dtype).replace("torch.", ""),
+        mixed_precision=mixed_precision,
+        tiled=tiled,
+        model_cfg=_to_plain_dict(cfg.model),
+        data_train_cfg=_to_plain_dict(cfg.data.train),
+    )
+    expected_meta["history_cache"] = {
+        "enabled": precompute_history,
+        "max_size": int(dataset_cfg.get("history_max_size", 0)) if precompute_history else 0,
+        "raw_stride": int(dataset_cfg.get("history_raw_stride", 1)),
+        "anchor_size": int(dataset_cfg.get("history_anchor_size", 0)),
+        "anchor_stride": int(dataset_cfg.get("history_anchor_stride", 1)),
+        "recent_min_size": int(dataset_cfg.get("history_recent_min_size", 0)),
+        "recent_max_size": int(dataset_cfg.get("history_recent_max_size", 0)),
+        "recent_stride": int(dataset_cfg.get("history_recent_stride", 1)),
+        "encoding": (
+            "derived_from_episode_main_first_latent_t1_no_duplication"
+            if precompute_history and storage_format == "episode_packed_v1"
+            else ("independent_t1" if precompute_history else None)
+        ),
+    }
+    strict_memory_cache = bool(
+        precompute_history and int(dataset_cfg.get("history_anchor_size", 0)) > 0
+    )
+    if strict_memory_cache:
+        if not hasattr(dataset, "get_latent_cache_split_contract"):
+            raise TypeError(
+                "Anchor+recent cache precompute requires a dataset split identity contract."
+            )
+        expected_meta["split_contract"] = dataset.get_latent_cache_split_contract()
+
     index_path = latent_cache_dir / "index.pt"
+    meta_path = latent_cache_dir / "meta.json"
     manifests_dir = latent_cache_dir / "manifests"
     storage_dir_name = ("shards" if storage_format == "sharded_v1" else "episodes")
     storage_dir = latent_cache_dir / storage_dir_name
     rebuild_marker_path = latent_cache_dir / ".index_rebuild_in_progress.json"
+    cache_has_artifacts = latent_cache_dir.is_dir() and any(latent_cache_dir.iterdir())
+    if strict_memory_cache and cache_has_artifacts and not overwrite:
+        _validate_existing_memory_cache_meta(
+            meta_path=meta_path,
+            expected_meta=expected_meta,
+        )
+    if rank == 0:
+        _atomic_json_dump(expected_meta, meta_path)
+    if is_distributed:
+        dist.barrier()
+
     existing_index = None
     existing_sample_to_shard = None
     existing_sample_to_offset = None
@@ -692,20 +944,17 @@ def main(cfg: DictConfig):
         )
 
     device = _resolve_train_device()
-    mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
-    model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
-    cache_dtype = _resolve_precompute_cache_dtype(
-        cfg.get("precompute_cache_dtype", "model"),
-        model_dtype=model_dtype,
-    )
     model = _build_video_only_model(cfg.model, model_dtype=model_dtype, device=device)
     model.eval()
     if rank == 0:
         logger.info(
-            "Precompute setup: storage_format=%s video_only=%s batch_size=%d workers=%d cache_dtype=%s",
+            "Precompute setup: storage_format=%s video_only=%s history=%s batch_size=%d "
+            "history_encode_batch_size=%d workers=%d cache_dtype=%s",
             storage_format,
             precompute_video_only,
+            precompute_history,
             precompute_batch_size,
+            history_encode_batch_size,
             precompute_num_workers,
             str(cache_dtype).replace("torch.", ""),
         )
@@ -729,29 +978,12 @@ def main(cfg: DictConfig):
                 "not used in this mode."
             )
 
-    if rank == 0:
-        format_name = {
-            "single_file_v1": "lightwam_video_latent_cache_v1",
-            "sharded_v1": "lightwam_video_latent_cache_sharded_v1",
-            "episode_packed_v1": "lightwam_video_latent_cache_episode_packed_v1",
-        }[storage_format]
-        meta = build_canonical_video_latent_meta_payload(
-            format_name=format_name,
-            storage_format=storage_format,
-            video_only=precompute_video_only,
-            shard_size=(shard_size if storage_format == "sharded_v1" else None),
-            cache_dtype=str(cache_dtype).replace("torch.", ""),
-            mixed_precision=mixed_precision,
-            tiled=tiled,
-            model_cfg=_to_plain_dict(cfg.model),
-            data_train_cfg=_to_plain_dict(cfg.data.train),
-        )
-        _atomic_json_dump(meta, latent_cache_dir / "meta.json")
-
     saved_count = 0
     skipped_count = int(prefiltered_skipped_count)
     pending_sample_indices: list[int] = []
     pending_latents: list[torch.Tensor] = []
+    pending_history_latents: list[torch.Tensor] = []
+    pending_history_valid_masks: list[torch.Tensor] = []
     local_manifest_sample_indices: list[int] = []
     local_manifest_shard_ids: list[int] = []
     local_manifest_offsets: list[int] = []
@@ -773,14 +1005,27 @@ def main(cfg: DictConfig):
             cur_size = min(len(pending_sample_indices), shard_size)
             cur_sample_indices = pending_sample_indices[:cur_size]
             cur_latents = pending_latents[:cur_size]
+            cur_history_latents = pending_history_latents[:cur_size]
+            cur_history_valid_masks = pending_history_valid_masks[:cur_size]
             del pending_sample_indices[:cur_size]
             del pending_latents[:cur_size]
+            del pending_history_latents[:cur_size]
+            del pending_history_valid_masks[:cur_size]
 
             shard_relpath = f"shards/rank{rank:03d}_shard{next_local_storage_id:06d}.pt"
             shard_payload = {
                 "sample_indices": torch.tensor(cur_sample_indices, dtype=torch.int64),
                 "video_latents": torch.stack(cur_latents, dim=0).contiguous(),
             }
+            if precompute_history:
+                shard_payload["history_video_latents"] = torch.stack(
+                    cur_history_latents,
+                    dim=0,
+                ).contiguous()
+                shard_payload["history_valid_mask"] = torch.stack(
+                    cur_history_valid_masks,
+                    dim=0,
+                ).to(dtype=torch.bool).contiguous()
             _atomic_torch_save(shard_payload, latent_cache_dir / shard_relpath)
 
             local_shard_id = len(local_shard_paths)
@@ -845,6 +1090,11 @@ def main(cfg: DictConfig):
                 encoded_sample_indices: list[int] = []
                 encoded_latents: list[torch.Tensor] = []
                 if any(needs_encode):
+                    if precompute_history and not all(needs_encode):
+                        raise RuntimeError(
+                            f"Episode {episode_idx} is only partially cached. Remove its incomplete "
+                            "episode cache file before resuming memory-aware precompute."
+                        )
                     load_start = _timing_start(
                         enabled=precompute_timing_enabled,
                         sync_cuda=precompute_timing_sync_cuda,
@@ -909,7 +1159,6 @@ def main(cfg: DictConfig):
                             sync_cuda=precompute_timing_sync_cuda,
                             device=model.device,
                         )
-
                         encode_start = _timing_start(
                             enabled=precompute_timing_enabled,
                             sync_cuda=precompute_timing_sync_cuda,
@@ -944,11 +1193,15 @@ def main(cfg: DictConfig):
                             f"episodes/rank{rank:03d}_episode{int(episode_idx):06d}_"
                             f"{next_local_storage_id:06d}.pt"
                         )
+                        episode_video_latents = torch.stack(encoded_latents, dim=0).contiguous()
                         shard_payload = {
                             "episode_index": int(episode_idx),
                             "sample_indices": torch.tensor(encoded_sample_indices, dtype=torch.int64),
-                            "video_latents": torch.stack(encoded_latents, dim=0).contiguous(),
+                            "video_latents": episode_video_latents,
                         }
+                        # Do not materialize [target, history] copies here. The
+                        # episode-packed reader gathers fixed anchor/recent slots
+                        # from each source sample's first causal latent.
                         _atomic_torch_save(shard_payload, latent_cache_dir / shard_relpath)
 
                         local_shard_id = len(local_shard_paths)
@@ -983,6 +1236,25 @@ def main(cfg: DictConfig):
                 timing_window["encode_ms"] += encode_ms
                 timing_window["save_ms"] += save_ms
                 timing_window["step_total_ms"] += step_total_ms
+
+                # Episode-packed precompute materializes raw frames, processed
+                # pixels, batched clips, and the packed latent payload. Keeping
+                # the final references alive until the next loop iteration made
+                # glibc retain several GiB per episode on long LIBERO videos.
+                # Drop them together after the atomic save and return unused
+                # allocator pages to the host before decoding the next episode.
+                encoded_sample_indices.clear()
+                encoded_latents.clear()
+                episode_payload = None
+                episode_images = None
+                processed_pixel_values = None
+                video_batch = None
+                latents = None
+                episode_video_latents = None
+                shard_payload = None
+                history_latents = None
+                history_valid_mask = None
+                _release_episode_precompute_memory()
 
                 postfix = {"saved": saved_count, "skipped": skipped_count}
                 if precompute_timing_enabled:
@@ -1110,6 +1382,27 @@ def main(cfg: DictConfig):
                     )
                     latents = model._encode_video_latents(video_to_encode, tiled=tiled)
                     latents = latents.detach().to(device="cpu", dtype=cache_dtype)
+                    history_latents = None
+                    history_valid_mask = None
+                    if precompute_history:
+                        if "history_video" not in batch or "history_valid_mask" not in batch:
+                            raise KeyError(
+                                "Memory-aware precompute requires `history_video` and "
+                                "`history_valid_mask` from the dataset."
+                            )
+                        history_video = batch["history_video"][encode_indices]
+                        history_valid_mask = torch.as_tensor(
+                            batch["history_valid_mask"][encode_indices],
+                            dtype=torch.bool,
+                        ).contiguous()
+                        history_latents = _encode_independent_history_latents(
+                            model=model,
+                            history_video=history_video,
+                            history_valid_mask=history_valid_mask,
+                            tiled=tiled,
+                            cache_dtype=cache_dtype,
+                            encode_batch_size=history_encode_batch_size,
+                        )
                     encode_ms = _timing_end_ms(
                         encode_start,
                         enabled=precompute_timing_enabled,
@@ -1128,12 +1421,24 @@ def main(cfg: DictConfig):
                         if storage_format == "sharded_v1":
                             pending_sample_indices.append(int(sample_idx))
                             pending_latents.append(video_latents)
+                            if precompute_history:
+                                pending_history_latents.append(history_latents[local_pos].clone())
+                                pending_history_valid_masks.append(
+                                    history_valid_mask[local_pos].clone()
+                                )
                         else:
                             cache_path = cache_paths[batch_pos]
                             payload = {
                                 "sample_idx": int(sample_idx),
                                 "video_latents": video_latents,
                             }
+                            if precompute_history:
+                                payload["history_video_latents"] = history_latents[
+                                    local_pos
+                                ].clone()
+                                payload["history_valid_mask"] = history_valid_mask[
+                                    local_pos
+                                ].clone()
                             _atomic_torch_save(payload, cache_path)
                             saved_count += 1
 

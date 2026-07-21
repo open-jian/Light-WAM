@@ -1,0 +1,13 @@
+# @package _global_
+
+defaults:
+  - sim_rmbench_anchor_recent_memory
+  - override /experiment: rmbench/put_back_block_anchor_recent_memory_5k
+  - _self_
+
+EVALUATION:
+  task_name: put_back_block
+  output_dir: ./Outputs/rmbench_anchor_recent_memory/put_back_block/no_mem_5k_to_memory_5k/eval/${now:%Y%m%d_%H%M%S}
+  action_horizon: 32
+  replan_steps: 24
+  dataset_stats_path: ${data.train.pretrained_norm_stats}

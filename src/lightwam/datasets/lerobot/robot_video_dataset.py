@@ -1,7 +1,9 @@
 import hashlib
 import inspect
+import json
 import os
 import re
+from pathlib import Path
 from typing import Optional
 import time
 import numpy as np
@@ -19,6 +21,10 @@ from .utils.normalizer import save_dataset_stats_to_json, load_dataset_stats_fro
 from ..dataset_utils import ResizeSmallestSideAspectPreserving, CenterCrop, Normalize
 from lightwam.utils.logging_config import get_logger
 from lightwam.utils import misc, pytorch_utils
+from lightwam.memory import (
+    build_anchor_recent_history_indices,
+    validate_anchor_recent_layout,
+)
 from accelerate import PartialState
 logger = get_logger(__name__)
 
@@ -56,9 +62,93 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         latent_cache_dir: Optional[str] = None,
         video_only: bool = False,
         video_backend: Optional[str] = None,
+        history_enabled: bool = False,
+        history_max_size: int = 12,
+        history_raw_stride: int = 4,
+        history_anchor_size: int = 0,
+        history_anchor_stride: int = 4,
+        history_recent_min_size: Optional[int] = None,
+        history_recent_max_size: Optional[int] = None,
+        history_recent_stride: Optional[int] = None,
     ):
+        self.history_enabled = bool(history_enabled)
+        self.history_max_size = int(history_max_size) if self.history_enabled else 0
+        self.history_raw_stride = int(history_raw_stride)
+        self.history_anchor_size = int(history_anchor_size) if self.history_enabled else 0
+        self.history_anchor_stride = int(history_anchor_stride)
+        self.history_recent_max_size = (
+            self.history_max_size - self.history_anchor_size
+            if history_recent_max_size is None
+            else int(history_recent_max_size)
+        ) if self.history_enabled else 0
+        self.history_recent_min_size = (
+            self.history_recent_max_size
+            if history_recent_min_size is None
+            else int(history_recent_min_size)
+        ) if self.history_enabled else 0
+        self.history_recent_stride = (
+            self.history_raw_stride
+            if history_recent_stride is None
+            else int(history_recent_stride)
+        )
+        if self.history_max_size < 0:
+            raise ValueError(f"`history_max_size` must be non-negative, got {self.history_max_size}.")
+        if self.history_enabled and self.history_max_size == 0:
+            raise ValueError("Enabled history memory requires `history_max_size` to be positive.")
+        if self.history_raw_stride <= 0:
+            raise ValueError(f"`history_raw_stride` must be positive, got {self.history_raw_stride}.")
+        if self.history_enabled:
+            validate_anchor_recent_layout(
+                history_max_size=self.history_max_size,
+                anchor_size=self.history_anchor_size,
+                anchor_stride=self.history_anchor_stride,
+                recent_max_size=self.history_recent_max_size,
+                recent_stride=self.history_recent_stride,
+            )
+            if not 0 <= self.history_recent_min_size <= self.history_recent_max_size:
+                raise ValueError(
+                    "Recent history sizes must satisfy 0 <= min <= max, got "
+                    f"{self.history_recent_min_size} and {self.history_recent_max_size}."
+                )
+            if self.history_recent_stride != self.history_raw_stride:
+                raise ValueError(
+                    "Online observation stride and recent-history stride must match, got "
+                    f"{self.history_raw_stride} and {self.history_recent_stride}."
+                )
+            if self.history_anchor_size > 0 and self.history_anchor_stride != self.history_raw_stride:
+                raise ValueError(
+                    "Episode-start anchors must use the same observation stride as online memory, "
+                    f"got {self.history_anchor_stride} and {self.history_raw_stride}."
+                )
+        if self.history_enabled and int(global_sample_stride) != 1:
+            raise ValueError(
+                "Recent-observation memory offsets are defined on raw frames; "
+                "set `global_sample_stride=1`."
+            )
+        self.history_frame_offsets = list(
+            range(
+                -self.history_recent_max_size * self.history_recent_stride,
+                0,
+                self.history_recent_stride,
+            )
+        )
         self.video_only = bool(video_only)
         self.use_latent_cache = bool(use_latent_cache)
+        # Memory-aware precompute reads the fixed maximum history together with
+        # the ordinary clip. Cache-backed training reads no pixels at all.
+        if self.history_enabled and self.history_anchor_size > 0 and not (
+            self.use_latent_cache or self.video_only
+        ):
+            raise ValueError(
+                "Anchor+recent memory requires an episode-packed latent cache. "
+                "Raw per-sample loading cannot address episode-start anchors."
+            )
+        if self.video_only and self.history_enabled and self.history_anchor_size == 0:
+            image_observation_offsets = self.history_frame_offsets + list(range(num_frames))
+        elif self.video_only or self.use_latent_cache:
+            image_observation_offsets = list(range(num_frames))
+        else:
+            image_observation_offsets = self.history_frame_offsets + list(range(num_frames))
         if latent_cache_dir is None or str(latent_cache_dir).strip() == "":
             self.latent_cache_dir = None
         else:
@@ -77,6 +167,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             is_training_set=is_training_set,
             global_sample_stride=global_sample_stride,
             return_action_state=not self.video_only,
+            image_observation_offsets=image_observation_offsets,
         )
     
         self.num_frames = num_frames
@@ -120,6 +211,15 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             if isinstance(processor, DictConfig):
                 processor = instantiate(processor)
             self.processor = processor
+            if hasattr(self.processor, "history_num_frames"):
+                configured_history = int(self.processor.history_num_frames)
+                if self.history_enabled and configured_history != self.history_max_size:
+                    raise ValueError(
+                        "Processor/dataset history size mismatch: "
+                        f"processor={configured_history}, dataset={self.history_max_size}."
+                    )
+                if not self.history_enabled:
+                    self.processor.history_num_frames = 0
             if is_training_set:
                 self.processor.train()
             else:
@@ -190,15 +290,91 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             raise TypeError(
                 f"`sample_to_shard` and `sample_to_offset` must be tensors in {index_path}."
             )
+        expected_samples = len(self.lerobot_dataset)
+        indexed_samples = int(index_payload.get("num_samples", -1))
+        if indexed_samples != expected_samples:
+            raise ValueError(
+                "Latent cache split/sample count mismatch: "
+                f"index={indexed_samples}, dataset={expected_samples} in {index_path}."
+            )
+        if (
+            sample_to_shard.ndim != 1
+            or sample_to_offset.ndim != 1
+            or int(sample_to_shard.numel()) != expected_samples
+            or int(sample_to_offset.numel()) != expected_samples
+        ):
+            raise ValueError(
+                "Latent cache index tensors must be complete 1D maps for the current split: "
+                f"shard={tuple(sample_to_shard.shape)}, offset={tuple(sample_to_offset.shape)}, "
+                f"expected=({expected_samples},) in {index_path}."
+            )
+        if bool((sample_to_shard < 0).any().item()) or bool(
+            (sample_to_offset < 0).any().item()
+        ):
+            raise ValueError(
+                f"Latent cache index is incomplete for the current split: {index_path}."
+            )
 
         if storage_format not in {"sharded_v1", "episode_packed_v1"}:
             raise ValueError(
                 f"Unsupported indexed latent cache format `{storage_format}` in {index_path}."
             )
+        if expected_samples > 0 and int(sample_to_shard.max().item()) >= len(shard_paths):
+            raise ValueError(
+                "Latent cache index references an out-of-range shard id: "
+                f"max={int(sample_to_shard.max().item())}, shards={len(shard_paths)} "
+                f"in {index_path}."
+            )
         self._latent_cache_format = storage_format
         self._latent_cache_shard_paths = [str(path) for path in shard_paths]
         self._latent_cache_sample_to_shard = sample_to_shard.to(dtype=torch.int64, device="cpu").contiguous()
         self._latent_cache_sample_to_offset = sample_to_offset.to(dtype=torch.int64, device="cpu").contiguous()
+        if self.history_enabled and self.history_anchor_size > 0:
+            if storage_format != "episode_packed_v1":
+                raise ValueError(
+                    "Anchor+recent memory requires an episode-packed latent cache, "
+                    f"got {storage_format} in {index_path}."
+                )
+            meta_path = os.path.join(self.latent_cache_dir, "meta.json")
+            if not os.path.exists(meta_path):
+                raise FileNotFoundError(
+                    f"Memory latent cache is missing required metadata: {meta_path}."
+                )
+            with open(meta_path, "r", encoding="utf-8") as meta_file:
+                meta_payload = json.load(meta_file)
+            expected_split_contract = self.get_latent_cache_split_contract()
+            actual_split_contract = meta_payload.get("split_contract")
+            if actual_split_contract != expected_split_contract:
+                raise ValueError(
+                    "Latent cache train/validation episode split mismatch in "
+                    f"{meta_path}: cached={actual_split_contract}, "
+                    f"expected={expected_split_contract}. Recompute the cache."
+                )
+            history_meta = meta_payload.get("history_cache")
+            if not isinstance(history_meta, dict) or not bool(history_meta.get("enabled", False)):
+                raise ValueError(f"Latent cache metadata does not enable history: {meta_path}.")
+            expected_history_meta = {
+                "max_size": self.history_max_size,
+                "raw_stride": self.history_raw_stride,
+                "anchor_size": self.history_anchor_size,
+                "anchor_stride": self.history_anchor_stride,
+                "recent_min_size": self.history_recent_min_size,
+                "recent_max_size": self.history_recent_max_size,
+                "recent_stride": self.history_recent_stride,
+            }
+            mismatches = {
+                key: (history_meta.get(key), expected)
+                for key, expected in expected_history_meta.items()
+                if int(history_meta.get(key, -1)) != int(expected)
+            }
+            expected_encoding = "derived_from_episode_main_first_latent_t1_no_duplication"
+            if str(history_meta.get("encoding")) != expected_encoding:
+                mismatches["encoding"] = (history_meta.get("encoding"), expected_encoding)
+            if mismatches:
+                raise ValueError(
+                    "Latent cache memory contract mismatch in "
+                    f"{meta_path}: {mismatches}. Recompute the cache."
+                )
         logger.info(
             "Loaded indexed latent cache index: format=%s shards=%d samples=%d",
             storage_format,
@@ -226,7 +402,75 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             )
         return video_latents.contiguous()
 
-    def _load_cached_video_latents_from_single_file(self, sample_idx: int) -> torch.Tensor:
+    def _validate_cached_history(
+        self,
+        history_video_latents: torch.Tensor,
+        history_valid_mask: torch.Tensor,
+        source_path: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not isinstance(history_video_latents, torch.Tensor):
+            raise TypeError(
+                "`history_video_latents` must be a tensor, "
+                f"got {type(history_video_latents)} in {source_path}."
+            )
+        if history_video_latents.ndim == 5 and history_video_latents.shape[0] == 1:
+            history_video_latents = history_video_latents.squeeze(0)
+        if history_video_latents.ndim != 4:
+            raise ValueError(
+                "Cached `history_video_latents` must be [C,H,h,w], "
+                f"got {tuple(history_video_latents.shape)} in {source_path}."
+            )
+        if int(history_video_latents.shape[1]) != self.history_max_size:
+            raise ValueError(
+                "Cached history length mismatch: "
+                f"got {history_video_latents.shape[1]}, expected {self.history_max_size} in {source_path}."
+            )
+        if not isinstance(history_valid_mask, torch.Tensor):
+            history_valid_mask = torch.as_tensor(history_valid_mask, dtype=torch.bool)
+        history_valid_mask = history_valid_mask.to(dtype=torch.bool, device="cpu").view(-1)
+        if int(history_valid_mask.numel()) != self.history_max_size:
+            raise ValueError(
+                "Cached `history_valid_mask` length mismatch: "
+                f"got {history_valid_mask.numel()}, expected {self.history_max_size} in {source_path}."
+            )
+        return history_video_latents.contiguous(), history_valid_mask.contiguous()
+
+    def _validate_cached_latent_entry(self, payload: dict, source_path: str) -> dict:
+        if "video_latents" not in payload:
+            raise KeyError(f"Latent cache payload missing `video_latents`: {source_path}")
+        entry = {
+            "video_latents": self._validate_video_latents(payload["video_latents"], source_path),
+        }
+        if self.history_enabled:
+            missing = [
+                key
+                for key in ("history_video_latents", "history_valid_mask")
+                if key not in payload
+            ]
+            if missing:
+                raise KeyError(
+                    f"Memory-enabled cache payload is missing {missing}: {source_path}. "
+                    "Recompute this cache with maximum-window history enabled."
+                )
+            history_latents, history_valid_mask = self._validate_cached_history(
+                payload["history_video_latents"],
+                payload["history_valid_mask"],
+                source_path,
+            )
+            if (
+                history_latents.shape[0] != entry["video_latents"].shape[0]
+                or history_latents.shape[-2:] != entry["video_latents"].shape[-2:]
+            ):
+                raise ValueError(
+                    "Cached main/history latent shape mismatch: "
+                    f"main={tuple(entry['video_latents'].shape)} "
+                    f"history={tuple(history_latents.shape)} in {source_path}."
+                )
+            entry["history_video_latents"] = history_latents
+            entry["history_valid_mask"] = history_valid_mask
+        return entry
+
+    def _load_cached_latent_entry_from_single_file(self, sample_idx: int) -> dict:
         cache_path = self._get_latent_cache_path(sample_idx)
         if not os.path.exists(cache_path):
             raise FileNotFoundError(
@@ -235,18 +479,19 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             )
         payload = torch.load(cache_path, map_location="cpu")
         if isinstance(payload, dict):
-            if "video_latents" not in payload:
-                raise KeyError(f"Latent cache payload missing `video_latents`: {cache_path}")
-            video_latents = payload["video_latents"]
+            return self._validate_cached_latent_entry(payload, cache_path)
         elif isinstance(payload, torch.Tensor):
-            video_latents = payload
+            if self.history_enabled:
+                raise TypeError(
+                    f"Tensor-only cache cannot provide history memory: {cache_path}. Recompute the cache."
+                )
+            return {"video_latents": self._validate_video_latents(payload, cache_path)}
         else:
             raise TypeError(
                 f"Unsupported latent cache payload type {type(payload)} in {cache_path}."
             )
-        return self._validate_video_latents(video_latents, cache_path)
 
-    def _load_cached_video_latents_from_shard(self, sample_idx: int) -> torch.Tensor:
+    def _load_cached_latent_entry_from_shard(self, sample_idx: int) -> dict:
         if self.latent_cache_dir is None:
             raise ValueError("`latent_cache_dir` is not set.")
         if self._latent_cache_sample_to_shard is None or self._latent_cache_sample_to_offset is None:
@@ -281,32 +526,89 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             raise TypeError(
                 f"Shard payload must be a dict, got {type(shard_payload)} in {self._latent_cache_last_shard_relpath}."
             )
+        source_path = self._latent_cache_last_shard_relpath
         if "video_latents" not in shard_payload:
-            raise KeyError(f"Shard payload missing `video_latents`: {self._latent_cache_last_shard_relpath}")
+            raise KeyError(f"Shard payload missing `video_latents`: {source_path}")
         video_latents = shard_payload["video_latents"]
         if not isinstance(video_latents, torch.Tensor) or video_latents.ndim != 5:
             raise ValueError(
                 f"Sharded `video_latents` must be 5D [N,C,T,H,W], got "
                 f"{None if not isinstance(video_latents, torch.Tensor) else tuple(video_latents.shape)} "
-                f"in {self._latent_cache_last_shard_relpath}"
+                f"in {source_path}"
             )
         if offset >= int(video_latents.shape[0]):
             raise IndexError(
-                f"Offset {offset} out of range for shard {self._latent_cache_last_shard_relpath}."
+                f"Offset {offset} out of range for shard {source_path}."
             )
         sample_indices = shard_payload.get("sample_indices")
         if isinstance(sample_indices, torch.Tensor):
             if int(sample_indices[offset].item()) != int(sample_idx):
                 raise ValueError(
                     f"Shard index mismatch for sample idx={sample_idx}: "
-                    f"found {int(sample_indices[offset].item())} in {self._latent_cache_last_shard_relpath}"
+                    f"found {int(sample_indices[offset].item())} in {source_path}"
                 )
-        return self._validate_video_latents(video_latents[offset], self._latent_cache_last_shard_relpath)
+        entry_payload = {"video_latents": video_latents[offset]}
+        if self.history_enabled:
+            if self._latent_cache_format == "episode_packed_v1":
+                if not isinstance(sample_indices, torch.Tensor) or sample_indices.ndim != 1:
+                    raise ValueError(
+                        "Episode-packed memory cache requires 1D `sample_indices` in "
+                        f"{source_path}."
+                    )
+                expected = torch.arange(
+                    int(sample_indices[0].item()),
+                    int(sample_indices[0].item()) + int(sample_indices.numel()),
+                    dtype=torch.int64,
+                )
+                actual = sample_indices.to(dtype=torch.int64, device="cpu")
+                if not torch.equal(actual, expected):
+                    raise ValueError(
+                        "Episode-packed memory cache must contain one complete contiguous "
+                        f"episode in sample order: {source_path}."
+                    )
+                history_sources, history_valid_mask = build_anchor_recent_history_indices(
+                    target_local_indices=[offset],
+                    episode_length=int(video_latents.shape[0]),
+                    history_max_size=self.history_max_size,
+                    anchor_size=self.history_anchor_size,
+                    anchor_stride=self.history_anchor_stride,
+                    recent_max_size=self.history_recent_max_size,
+                    recent_stride=self.history_recent_stride,
+                )
+                first_latents = video_latents[:, :, 0]
+                gathered = first_latents[history_sources[0]]
+                history_video_latents = gathered.permute(1, 0, 2, 3).contiguous()
+                history_video_latents = history_video_latents.masked_fill(
+                    ~history_valid_mask[0, None, :, None, None],
+                    0,
+                )
+                entry_payload["history_video_latents"] = history_video_latents
+                entry_payload["history_valid_mask"] = history_valid_mask[0]
+            else:
+                for key, expected_ndim in (
+                    ("history_video_latents", 5),
+                    ("history_valid_mask", 2),
+                ):
+                    value = shard_payload.get(key)
+                    if not isinstance(value, torch.Tensor) or value.ndim != expected_ndim:
+                        raise ValueError(
+                            f"Sharded `{key}` must be {expected_ndim}D, got "
+                            f"{None if not isinstance(value, torch.Tensor) else tuple(value.shape)} in {source_path}."
+                        )
+                    if int(value.shape[0]) != int(video_latents.shape[0]):
+                        raise ValueError(
+                            f"Shard entry count mismatch for `{key}` in {source_path}."
+                        )
+                    entry_payload[key] = value[offset]
+        return self._validate_cached_latent_entry(entry_payload, source_path)
+
+    def _load_cached_latent_entry(self, sample_idx: int) -> dict:
+        if self._latent_cache_format in {"sharded_v1", "episode_packed_v1"}:
+            return self._load_cached_latent_entry_from_shard(sample_idx)
+        return self._load_cached_latent_entry_from_single_file(sample_idx)
 
     def _load_cached_video_latents(self, sample_idx: int) -> torch.Tensor:
-        if self._latent_cache_format in {"sharded_v1", "episode_packed_v1"}:
-            return self._load_cached_video_latents_from_shard(sample_idx)
-        return self._load_cached_video_latents_from_single_file(sample_idx)
+        return self._load_cached_latent_entry(sample_idx)["video_latents"]
 
     @staticmethod
     def _resolve_sample_idx(sample: dict) -> int:
@@ -329,6 +631,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 "`processor` must implement `build_pixel_values_from_images()` "
                 "for `video_only=true` latent precompute."
             )
+        if self.video_only and hasattr(self.processor, "_build_pixel_values_from_images_impl"):
+            return self.processor._build_pixel_values_from_images_impl(
+                sample,
+                expected_num_obs_steps=self.num_frames,
+            )
         return self.processor.build_pixel_values_from_images(sample)
 
     def _build_episode_pixel_values_from_raw_images(self, episode_images: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -345,6 +652,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         self,
         video: torch.Tensor,
         image_is_pad: torch.Tensor,
+        temporal_indices: Optional[list[int]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not isinstance(video, torch.Tensor):
             raise TypeError(f"`video` must be a torch.Tensor, got {type(video)}")
@@ -352,16 +660,22 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             image_is_pad = torch.as_tensor(image_is_pad, dtype=torch.bool)
         image_is_pad = image_is_pad.to(dtype=torch.bool)
 
+        if temporal_indices is None:
+            temporal_indices = self.video_sample_indices
+        temporal_indices = [int(index) for index in temporal_indices]
+        if not temporal_indices:
+            raise ValueError("`temporal_indices` must contain at least one frame index.")
+
         num_cameras = 1
         if video.ndim == 5:
-            video = video[:, self.video_sample_indices, :, :, :]
+            video = video[:, temporal_indices, :, :, :]
             num_cameras, t_video, c_dim, h_dim, w_dim = video.shape
         else:
             if video.ndim != 4:
                 raise ValueError(f"Expected video to have shape [T,C,H,W] or [N,T,C,H,W], got {tuple(video.shape)}")
-            video = video[self.video_sample_indices, :, :, :]
+            video = video[temporal_indices, :, :, :]
             t_video, c_dim, h_dim, w_dim = video.shape
-        image_is_pad = image_is_pad[self.video_sample_indices]
+        image_is_pad = image_is_pad[temporal_indices]
 
         video = video.reshape(num_cameras, t_video, c_dim, h_dim, w_dim)
         if self.concat_multi_camera == "robotwin":
@@ -408,10 +722,51 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         video = video.permute(1, 0, 2, 3).contiguous()
         return video, image_is_pad.contiguous()
 
+    def _build_video_and_history_for_cache(
+        self,
+        sample: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build the ordinary clip and fixed history candidates for precompute."""
+        if not self.history_enabled or not self.video_only or self.use_latent_cache:
+            raise RuntimeError("Memory-aware cache precompute requires raw video-only mode.")
+        if self.processor is None or not hasattr(
+            self.processor,
+            "_build_pixel_values_from_images_impl",
+        ):
+            raise TypeError("The processor must support raw image preprocessing.")
+        combined_is_pad = torch.as_tensor(sample["image_is_pad"], dtype=torch.bool)
+        expected_total = self.history_max_size + self.num_frames
+        if combined_is_pad.shape != (expected_total,):
+            raise ValueError(
+                "Memory-aware precompute padding must be [H+T], "
+                f"got {tuple(combined_is_pad.shape)} vs ({expected_total},)."
+            )
+        combined_pixel_values = self.processor._build_pixel_values_from_images_impl(
+            sample,
+            expected_num_obs_steps=expected_total,
+        )
+        history_pixel_values = combined_pixel_values[:, : self.history_max_size]
+        video_pixel_values = combined_pixel_values[:, self.history_max_size :]
+        history_is_pad = combined_is_pad[: self.history_max_size]
+        image_is_pad = combined_is_pad[self.history_max_size :]
+        history_video, history_is_pad = self._finalize_video_tensor(
+            video=history_pixel_values,
+            image_is_pad=history_is_pad,
+            temporal_indices=list(range(self.history_max_size)),
+        )
+        video, _ = self._finalize_video_tensor(
+            video=video_pixel_values,
+            image_is_pad=image_is_pad,
+        )
+        history_valid_mask = ~history_is_pad
+        history_video[:, ~history_valid_mask] = 0
+        return video, history_video, history_valid_mask
+
     def _finalize_batched_video_tensor(
         self,
         video: torch.Tensor,
         image_is_pad: torch.Tensor,
+        temporal_indices: Optional[list[int]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not isinstance(video, torch.Tensor):
             raise TypeError(f"`video` must be a torch.Tensor, got {type(video)}")
@@ -455,14 +810,20 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 out_width,
             )
 
+        if temporal_indices is None:
+            temporal_indices = self.video_sample_indices
+        temporal_indices = [int(index) for index in temporal_indices]
+        if not temporal_indices:
+            raise ValueError("`temporal_indices` must contain at least one frame index.")
+
         if video.ndim == 6:
-            video = video[:, :, self.video_sample_indices, :, :, :]
+            video = video[:, :, temporal_indices, :, :, :]
             batch_size, num_cameras, t_video, c_dim, h_dim, w_dim = video.shape
         else:
-            video = video[:, self.video_sample_indices, :, :, :]
+            video = video[:, temporal_indices, :, :, :]
             batch_size, t_video, c_dim, h_dim, w_dim = video.shape
             num_cameras = 1
-        image_is_pad = image_is_pad[:, self.video_sample_indices]
+        image_is_pad = image_is_pad[:, temporal_indices]
 
         if num_cameras == 1 and video.ndim == 6:
             video = video[:, 0]
@@ -526,6 +887,37 @@ class RobotVideoDataset(torch.utils.data.Dataset):
 
     def get_num_episodes(self) -> int:
         return int(self.lerobot_dataset.multi_dataset.num_episodes)
+
+    def get_latent_cache_split_contract(self) -> dict:
+        """Return a stable identity for the selected train/validation episodes."""
+        episodes = []
+        for episode_idx in range(self.get_num_episodes()):
+            dataset_index, dataset, _, source_episode_idx = self._resolve_episode_dataset(
+                episode_idx
+            )
+            sample_start, sample_end = self.get_episode_sample_range(episode_idx)
+            episodes.append(
+                {
+                    "dataset_index": int(dataset_index),
+                    "dataset_root": str(Path(dataset.root).expanduser().resolve()),
+                    "source_episode_index": int(source_episode_idx),
+                    "sample_start": int(sample_start),
+                    "sample_end": int(sample_end),
+                }
+            )
+        serialized = json.dumps(
+            episodes,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return {
+            "version": "lerobot_episode_split_v1",
+            "is_training_set": bool(self.lerobot_dataset.is_training_set),
+            "val_set_proportion": float(self.lerobot_dataset.val_set_proportion),
+            "num_samples": int(len(self.lerobot_dataset)),
+            "num_episodes": int(self.get_num_episodes()),
+            "episodes_sha256": hashlib.sha256(serialized).hexdigest(),
+        }
 
     def get_episode_sample_range(self, episode_idx: int) -> tuple[int, int]:
         num_episodes = self.get_num_episodes()
@@ -651,6 +1043,43 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         frame_indices = raw_indices.clamp(min=0, max=episode_length - 1)
         return frame_indices.contiguous(), image_is_pad.contiguous()
 
+    def _build_episode_history_indices_tensor(
+        self,
+        sample_indices: list[int] | torch.Tensor,
+        episode_sample_start: int,
+        episode_sample_end: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.history_enabled:
+            raise RuntimeError("History indices require history memory to be enabled.")
+        if isinstance(sample_indices, torch.Tensor):
+            sample_indices = sample_indices.to(dtype=torch.int64).view(-1)
+        else:
+            sample_indices = torch.tensor(sample_indices, dtype=torch.int64)
+        if sample_indices.numel() == 0:
+            return (
+                torch.empty((0, self.history_max_size), dtype=torch.int64),
+                torch.empty((0, self.history_max_size), dtype=torch.bool),
+            )
+        if bool((sample_indices < int(episode_sample_start)).any().item()) or bool(
+            (sample_indices >= int(episode_sample_end)).any().item()
+        ):
+            raise ValueError(
+                f"Sample indices must lie within [{episode_sample_start}, {episode_sample_end})."
+            )
+
+        episode_length = int(episode_sample_end - episode_sample_start)
+        local_indices = sample_indices - int(episode_sample_start)
+        frame_indices, history_valid_mask = build_anchor_recent_history_indices(
+            target_local_indices=local_indices,
+            episode_length=episode_length,
+            history_max_size=self.history_max_size,
+            anchor_size=self.history_anchor_size,
+            anchor_stride=self.history_anchor_stride,
+            recent_max_size=self.history_recent_max_size,
+            recent_stride=self.history_recent_stride,
+        )
+        return frame_indices, (~history_valid_mask).contiguous()
+
     def build_processed_episode_pixel_values(self, episode_images: dict[str, torch.Tensor]) -> torch.Tensor:
         return self._build_episode_pixel_values_from_raw_images(episode_images).contiguous()
 
@@ -696,6 +1125,10 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             episode_sample_start=episode_sample_start,
             episode_sample_end=episode_sample_end,
         )
+        # Gather only the nine VAE input frames instead of materializing all 33
+        # action-rate observations and slicing them afterwards.
+        frame_indices = frame_indices[:, self.video_sample_indices].contiguous()
+        image_is_pad = image_is_pad[:, self.video_sample_indices].contiguous()
         if frame_indices.numel() == 0:
             return torch.empty(
                 (
@@ -718,8 +1151,56 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         video, _ = self._finalize_batched_video_tensor(
             video=gathered_video,
             image_is_pad=image_is_pad,
+            temporal_indices=list(range(len(self.video_sample_indices))),
         )
         return video
+
+    def build_history_batch_from_processed_episode_pixel_values(
+        self,
+        processed_pixel_values: torch.Tensor,
+        sample_indices: list[int] | torch.Tensor,
+        episode_sample_start: int,
+        episode_sample_end: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.history_enabled:
+            raise RuntimeError("History batch construction requires history memory to be enabled.")
+        if not isinstance(processed_pixel_values, torch.Tensor) or processed_pixel_values.ndim != 5:
+            raise ValueError(
+                "`processed_pixel_values` must be [N,T,C,H,W], got "
+                f"{type(processed_pixel_values)} / {getattr(processed_pixel_values, 'shape', None)}."
+            )
+        frame_indices, history_is_pad = self._build_episode_history_indices_tensor(
+            sample_indices=sample_indices,
+            episode_sample_start=episode_sample_start,
+            episode_sample_end=episode_sample_end,
+        )
+        if frame_indices.numel() == 0:
+            return (
+                torch.empty(
+                    (
+                        0,
+                        int(processed_pixel_values.shape[2]),
+                        self.history_max_size,
+                        int(self.video_size[0]),
+                        int(self.video_size[1]),
+                    ),
+                    dtype=processed_pixel_values.dtype,
+                ),
+                torch.empty((0, self.history_max_size), dtype=torch.bool),
+            )
+        gathered_history = processed_pixel_values[:, frame_indices]
+        gathered_history = gathered_history.permute(1, 0, 2, 3, 4, 5).contiguous()
+        history_video, history_is_pad = self._finalize_batched_video_tensor(
+            video=gathered_history,
+            image_is_pad=history_is_pad,
+            temporal_indices=list(range(self.history_max_size)),
+        )
+        history_valid_mask = ~history_is_pad
+        history_video = history_video.masked_fill(
+            ~history_valid_mask[:, None, :, None, None],
+            0,
+        )
+        return history_video, history_valid_mask
 
     def _get(self, idx):
         sample_idx = idx
@@ -749,25 +1230,62 @@ class RobotVideoDataset(torch.utils.data.Dataset):
 
             sample_idx = np.random.randint(len(self.lerobot_dataset))
         if self.use_latent_cache:
-            # In latent-cache mode we bypass video decode/image transforms entirely and
-            # keep only the original action/state/text preprocessing path.
-            sample = self.processor.preprocess_without_images(sample)
+            # Both the original current/future video and the fixed maximum history
+            # are cache-backed. No raw image is decoded in the training loop.
             cache_sample_idx = self._resolve_sample_idx(sample)
+            cache_entry = self._load_cached_latent_entry(cache_sample_idx)
+            video_latents = cache_entry["video_latents"]
+            if self.history_enabled:
+                history_latents = cache_entry["history_video_latents"]
+                cached_history_valid_mask = cache_entry["history_valid_mask"]
+                current_image_is_pad = torch.as_tensor(sample["image_is_pad"], dtype=torch.bool)
+                if current_image_is_pad.shape != (self.num_frames,):
+                    raise ValueError(
+                        "Cache-backed current image padding must be [T], "
+                        f"got {tuple(current_image_is_pad.shape)} for T={self.num_frames}."
+                    )
+                sample = dict(sample)
+                sample["image_is_pad"] = torch.cat(
+                    [~cached_history_valid_mask, current_image_is_pad],
+                    dim=0,
+                )
+            sample = self.processor.preprocess_without_images(sample)
             image_is_pad = sample["image_is_pad"][self.video_sample_indices]
-            video_latents = self._load_cached_video_latents(cache_sample_idx)
+            if self.history_enabled:
+                history_valid_mask = sample["history_valid_mask"]
+                if not torch.equal(history_valid_mask, cached_history_valid_mask):
+                    raise ValueError("Cached history validity changed during preprocessing.")
         else:
             image_is_pad = sample["image_is_pad"]
 
             if self.video_only:
-                video = self._build_video_from_raw_images(sample)
+                if self.history_enabled:
+                    video, history_video, history_valid_mask = (
+                        self._build_video_and_history_for_cache(sample)
+                    )
+                else:
+                    video = self._build_video_from_raw_images(sample)
             else:
                 video = sample["pixel_values"]  # [T, C, H, W] or [num_cameras, T, C, H, W]
-            video, image_is_pad = self._finalize_video_tensor(video=video, image_is_pad=image_is_pad)
+            if not (self.video_only and self.history_enabled):
+                video, image_is_pad = self._finalize_video_tensor(video=video, image_is_pad=image_is_pad)
+            if self.history_enabled and not self.video_only:
+                history_video, history_is_pad = self._finalize_video_tensor(
+                    video=sample["history_pixel_values"],
+                    image_is_pad=~sample["history_valid_mask"],
+                    temporal_indices=list(range(self.history_max_size)),
+                )
+                history_valid_mask = ~history_is_pad
+                history_video[:, ~history_valid_mask] = 0
             if self.video_only:
-                return {
+                data = {
                     "idx": int(sample["idx"]),
                     "video": video,
                 }
+                if self.history_enabled:
+                    data["history_video"] = history_video
+                    data["history_valid_mask"] = history_valid_mask
+                return data
 
         # Proxy (from lerobot): 
         #   action: [num_frames-1, action_dim] # start from t0, except the last frame
@@ -816,6 +1334,12 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             data["video_latents"] = video_latents
         else:
             data["video"] = video
+        if self.history_enabled:
+            data["history_valid_mask"] = history_valid_mask
+            if self.use_latent_cache:
+                data["history_video_latents"] = history_latents
+            else:
+                data["history_video"] = history_video
         return data
 
     def _get_cached_text_context(self, prompt: str):

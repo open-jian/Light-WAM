@@ -78,7 +78,19 @@ def main(cfg: DictConfig) -> None:
     stats_path = _resolve_dataset_stats_path(cfg, ckpt_path)
     use_run_config = bool(cfg.EVALUATION.use_training_run_config)
     training_config = _resolve_training_config_path(cfg, ckpt_path) if use_run_config else None
-    sim_cfg_path = (PROJECT_ROOT / "configs" / "sim_rmbench_no_memory.yaml").resolve()
+    configured_sim_cfg = cfg.EVALUATION.get("sim_cfg_path")
+    if configured_sim_cfg is not None and str(configured_sim_cfg).strip():
+        sim_cfg_path = _resolve_path(str(configured_sim_cfg), base=PROJECT_ROOT)
+    else:
+        memory_enabled = bool(
+            cfg.get("model", {}).get("history_memory", {}).get("enabled", False)
+        )
+        sim_cfg_name = (
+            "sim_rmbench_anchor_recent_memory.yaml"
+            if memory_enabled
+            else "sim_rmbench_no_memory.yaml"
+        )
+        sim_cfg_path = (PROJECT_ROOT / "configs" / sim_cfg_name).resolve()
     sim_task = HydraConfig.get().runtime.choices.get("task")
 
     overrides: list[str] = []

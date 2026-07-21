@@ -927,6 +927,9 @@ class WanVideoDiT(torch.nn.Module):
         action: Optional[torch.Tensor] = None,
         fuse_vae_embedding_in_latents: bool = False,
         control_camera_latents_input: Optional[torch.Tensor] = None,
+        frame_position_offset: int = 0,
+        spatial_position_scale: int = 1,
+        temporal_position_ids: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         x, timestep, context_mask = self._validate_forward_inputs(
             x=x,
@@ -966,6 +969,12 @@ class WanVideoDiT(torch.nn.Module):
             t_mod = self.time_projection(t).unflatten(1, (6, self.hidden_dim))
         x = self.patchify(x, control_camera_latents_input=control_camera_latents_input)
         f, h, w = x.shape[2:]
+        frame_position_offset = int(frame_position_offset)
+        spatial_position_scale = int(spatial_position_scale)
+        if frame_position_offset < 0:
+            raise ValueError(f"`frame_position_offset` must be non-negative, got {frame_position_offset}.")
+        if spatial_position_scale <= 0:
+            raise ValueError(f"`spatial_position_scale` must be positive, got {spatial_position_scale}.")
 
         context = self.text_embedding(context) # (B, L, dim)
         context_len = context.shape[1]
@@ -1011,10 +1020,40 @@ class WanVideoDiT(torch.nn.Module):
 
         x_tokens = rearrange(x, "b c f h w -> b (f h w) c").contiguous()
 
+        if temporal_position_ids is None:
+            temporal_positions = torch.arange(
+                frame_position_offset,
+                frame_position_offset + f,
+                dtype=torch.long,
+            )
+        else:
+            temporal_positions = torch.as_tensor(
+                temporal_position_ids,
+                dtype=torch.long,
+            ).view(-1)
+            if int(temporal_positions.numel()) != int(f):
+                raise ValueError(
+                    "`temporal_position_ids` must have one entry per latent frame, "
+                    f"got {temporal_positions.numel()} for f={f}."
+                )
+            if bool((temporal_positions < 0).any().item()):
+                raise ValueError("`temporal_position_ids` must be non-negative.")
+        height_positions = torch.arange(0, h * spatial_position_scale, spatial_position_scale)
+        width_positions = torch.arange(0, w * spatial_position_scale, spatial_position_scale)
+        if (
+            int(temporal_positions[-1]) >= int(self.freqs[0].shape[0])
+            or int(height_positions[-1]) >= int(self.freqs[1].shape[0])
+            or int(width_positions[-1]) >= int(self.freqs[2].shape[0])
+        ):
+            raise ValueError(
+                "Requested RoPE positions exceed the precomputed range: "
+                f"time={int(temporal_positions[-1])}, height={int(height_positions[-1])}, "
+                f"width={int(width_positions[-1])}."
+            )
         freqs = torch.cat([
-            self.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-            self.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-            self.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+            self.freqs[0][temporal_positions].view(f, 1, 1, -1).expand(f, h, w, -1),
+            self.freqs[1][height_positions].view(1, h, 1, -1).expand(f, h, w, -1),
+            self.freqs[2][width_positions].view(1, 1, w, -1).expand(f, h, w, -1)
         ], dim=-1).reshape(f * h * w, 1, -1).to(x_tokens.device)
 
         return {
@@ -1028,6 +1067,9 @@ class WanVideoDiT(torch.nn.Module):
                 "grid_size": (f, h, w),
                 "tokens_per_frame": tokens_per_frame,
                 "batch_size": batch_size,
+                "frame_position_offset": frame_position_offset,
+                "spatial_position_scale": spatial_position_scale,
+                "temporal_position_ids": temporal_positions,
             },
         }
 
@@ -1045,11 +1087,13 @@ class WanVideoDiT(torch.nn.Module):
         context_attn_mask = pre_state["context_mask"]
 
         self.reset_wam_adapter_cache()
-        self_attn_mask = self.build_video_to_video_mask(
-            video_seq_len=x_tokens.shape[1],
-            video_tokens_per_frame=int(pre_state["meta"]["tokens_per_frame"]),
-            device=x_tokens.device,
-        ) if self.video_attention_mask_mode != "bidirectional" else None
+        self_attn_mask = pre_state.get("self_attn_mask")
+        if self_attn_mask is None and self.video_attention_mask_mode != "bidirectional":
+            self_attn_mask = self.build_video_to_video_mask(
+                video_seq_len=x_tokens.shape[1],
+                video_tokens_per_frame=int(pre_state["meta"]["tokens_per_frame"]),
+                device=x_tokens.device,
+            )
 
         for layer_idx, block in enumerate(self.blocks):
             if self.use_gradient_checkpointing:
