@@ -91,6 +91,7 @@ def main(cfg: DictConfig) -> None:
         ("policy_name", POLICY_NAME),
         ("instruction_type", cfg.EVALUATION.instruction_type),
         ("eval_num_episodes", int(cfg.EVALUATION.eval_num_episodes)),
+        ("episode_seed_start", cfg.EVALUATION.episode_seed_start),
         ("sim_cfg_path", str(sim_cfg_path)),
         ("sim_task", sim_task),
         ("use_training_run_config", use_run_config),

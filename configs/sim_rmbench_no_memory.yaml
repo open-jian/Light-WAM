@@ -20,6 +20,9 @@ EVALUATION:
   task_config: demo_clean
   instruction_type: unseen
   eval_num_episodes: 100
+  # Optional exact simulator seed for the first evaluated episode. When null,
+  # RM-Bench keeps its official default: 100000 * (1 + seed).
+  episode_seed_start: null
   output_dir: ./runs/rmbench_no_memory/eval/${now:%Y%m%d_%H%M%S}
   # Result-directory component passed to the official evaluator. Set this per
   # concurrent job to avoid its second-resolution output-directory collision.

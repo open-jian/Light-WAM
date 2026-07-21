@@ -123,6 +123,14 @@ def main() -> None:
     episode_limit = int(usr_args.get("eval_num_episodes", 100))
     if episode_limit <= 0:
         raise ValueError(f"eval_num_episodes must be positive, got {episode_limit}")
+    configured_episode_seed = usr_args.get("episode_seed_start")
+    episode_seed_start = (
+        None if configured_episode_seed is None else int(configured_episode_seed)
+    )
+    if episode_seed_start is not None and episode_seed_start < 0:
+        raise ValueError(
+            f"episode_seed_start must be non-negative, got {episode_seed_start}"
+        )
 
     video_layout = str(usr_args.get("video_layout", "third_view")).strip().lower()
     if video_layout not in {"third_view", "multi_view"}:
@@ -137,7 +145,13 @@ def main() -> None:
     original_eval_policy = official.eval_policy
 
     def eval_policy_with_limit(*args, **kwargs):
+        args = list(args)
         kwargs["test_num"] = episode_limit
+        if episode_seed_start is not None:
+            if len(args) >= 5:
+                args[4] = episode_seed_start
+            else:
+                kwargs["st_seed"] = episode_seed_start
         if video_layout == "multi_view":
             kwargs["video_size"] = f"{MULTI_VIEW_VIDEO_SIZE[0]}x{MULTI_VIEW_VIDEO_SIZE[1]}"
         next_seed, successes, reward_sum = original_eval_policy(*args, **kwargs)
