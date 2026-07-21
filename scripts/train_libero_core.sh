@@ -76,6 +76,7 @@ TEMPORAL_TAIL_WEIGHT="${TEMPORAL_TAIL_WEIGHT:-0.0}"
 MEMORY_MONITOR_ENABLED="${MEMORY_MONITOR_ENABLED:-true}"
 MEMORY_SHUFFLED_PROBE_EVERY="${MEMORY_SHUFFLED_PROBE_EVERY:-500}"
 MEMORY_PROBE_BATCH_SIZE="${MEMORY_PROBE_BATCH_SIZE:-2}"
+TRAIN_VISUALIZATION_ENABLED="${TRAIN_VISUALIZATION_ENABLED:-true}"
 
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 LR_SCHEDULER_TYPE="${LR_SCHEDULER_TYPE:-cosine}"
@@ -132,6 +133,7 @@ echo "[launch] max_steps=${MAX_STEPS} save_every=${SAVE_EVERY} checkpoint.max_to
 echo "[launch] learning_rate=${LEARNING_RATE} lr_scheduler_type=${LR_SCHEDULER_TYPE}"
 echo "[launch] model.loss.action_temporal_weighting.num_prefix_steps=${TEMPORAL_PREFIX_STEPS}"
 echo "[launch] memory_monitor.enabled=${MEMORY_MONITOR_ENABLED} shuffled_probe_every=${MEMORY_SHUFFLED_PROBE_EVERY} probe_batch_size=${MEMORY_PROBE_BATCH_SIZE}"
+echo "[launch] train_visualization.enabled=${TRAIN_VISUALIZATION_ENABLED}"
 echo "[launch] model.state_fusion_action_expert_config.token_pooling_num_queries=${TOKEN_POOLING_NUM_QUERIES}"
 echo "[launch] distributed.chunked_collectives.enabled=${DISTRIBUTED_CHUNKED_COLLECTIVES_ENABLED} max_bytes=${DISTRIBUTED_CHUNKED_COLLECTIVES_MAX_BYTES}"
 echo "[launch] accelerate_config=${ACCELERATE_CONFIG_FILE}"
@@ -201,7 +203,7 @@ CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch \
   "model.apply_video_latent_downsample_to_action_branch=false" \
   "timing_breakdown.enabled=false" \
   "timing_breakdown.sync_cuda=false" \
-  "train_visualization.enabled=true" \
+  "train_visualization.enabled=${TRAIN_VISUALIZATION_ENABLED}" \
   "train_visualization.every=500" \
   "train_visualization.fps=8" \
   "train_visualization.tiled=false" \
