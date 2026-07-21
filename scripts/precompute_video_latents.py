@@ -1,3 +1,5 @@
+import ctypes
+import gc
 import json
 import inspect
 import logging
@@ -27,6 +29,23 @@ from lightwam.utils.logging_config import get_logger, setup_logging
 
 register_default_resolvers()
 logger = get_logger(__name__)
+
+
+try:
+    _malloc_trim = ctypes.CDLL(None).malloc_trim
+    _malloc_trim.argtypes = [ctypes.c_size_t]
+    _malloc_trim.restype = ctypes.c_int
+except (AttributeError, OSError):
+    _malloc_trim = None
+
+
+def _release_episode_precompute_memory() -> None:
+    """Return large per-episode CPU/GPU buffers before loading the next episode."""
+    gc.collect()
+    if _malloc_trim is not None:
+        _malloc_trim(0)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _init_distributed():
@@ -1169,6 +1188,25 @@ def main(cfg: DictConfig):
                 timing_window["encode_ms"] += encode_ms
                 timing_window["save_ms"] += save_ms
                 timing_window["step_total_ms"] += step_total_ms
+
+                # Episode-packed precompute materializes raw frames, processed
+                # pixels, batched clips, and the packed latent payload. Keeping
+                # the final references alive until the next loop iteration made
+                # glibc retain several GiB per episode on long LIBERO videos.
+                # Drop them together after the atomic save and return unused
+                # allocator pages to the host before decoding the next episode.
+                encoded_sample_indices.clear()
+                encoded_latents.clear()
+                episode_payload = None
+                episode_images = None
+                processed_pixel_values = None
+                video_batch = None
+                latents = None
+                episode_video_latents = None
+                shard_payload = None
+                history_latents = None
+                history_valid_mask = None
+                _release_episode_precompute_memory()
 
                 postfix = {"saved": saved_count, "skipped": skipped_count}
                 if precompute_timing_enabled:
