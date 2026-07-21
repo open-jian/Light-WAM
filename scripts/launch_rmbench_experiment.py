@@ -111,7 +111,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--experiment",
-        default="rmbench/put_back_block_robotwin_style_3k",
+        default="rmbench/put_back_block_robotwin_style_5k",
         help="Hydra experiment config name under configs/experiment",
     )
     parser.add_argument(

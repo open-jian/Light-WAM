@@ -9,7 +9,7 @@ defaults:
 # configs/experiment/rmbench/put_back_block_robotwin_style_5k.yaml.
 EVALUATION:
   task_name: put_back_block
-  output_dir: ./runs/rmbench_no_memory/put_back_block/robotwin_style_5k/eval/${now:%Y%m%d_%H%M%S}
+  output_dir: ./runs/rmbench_no_memory/put_back_block/r460k_5k/eval/${now:%Y%m%d_%H%M%S}
   action_horizon: 32
   replan_steps: 24
   dataset_stats_path: ${data.train.pretrained_norm_stats}

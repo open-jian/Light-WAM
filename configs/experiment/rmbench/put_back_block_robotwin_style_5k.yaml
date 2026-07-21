@@ -7,7 +7,7 @@ defaults:
 # A self-contained experiment profile. Keep schedule/data changes here so the
 # generic RM-Bench and RoboTwin launchers remain untouched.
 experiment:
-  name: rmbench_put_back_block_no_memory_robotwin_style_5k
+  name: rmbench_pbb_r460k_5k
   task_name: put_back_block
   policy_memory: none
   evaluation_profile: sim_rmbench_put_back_block_robotwin_style_5k
@@ -16,22 +16,25 @@ experiment:
   evaluation_replan_steps: 24
 
 launcher:
-  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
-  num_processes: 8
+  gpu_ids: [0, 1, 2, 3]
+  num_processes: 4
   main_process_port: 29578
   accelerate_config_file: ./scripts/accelerate_configs/accelerate_zero1_ds.yaml
   expected_global_batch_size: 32
 
-output_dir: ./runs/rmbench_no_memory/put_back_block/robotwin_style_5k/${now:%Y-%m-%d_%H-%M-%S}
+# Initialize model weights from the released RoboTwin checkpoint. Optimizer,
+# scheduler, and fine-tuning step counter start fresh.
+resume: ./checkpoints/lightwam_release/lightwam_robotwin/checkpoints/weights/step_460000.pt
+output_dir: ./runs/rmbench_no_memory/put_back_block/r460k_5k/${now:%Y-%m-%d_%H-%M-%S}
 
-# Preserve the approved effective global batch of 32 while using all 8 GPUs.
-batch_size: 4
+# Match the completed 3k run: 4 GPUs with effective global batch 32.
+batch_size: 8
 num_workers: 8
 gradient_accumulation_steps: 1
 
 learning_rate: 1.0e-4
 lr_scheduler_type: cosine
-warmup_steps: 250
+warmup_steps: 1000
 max_steps: 5000
 # max_steps is authoritative; keep epochs high enough that a small task cannot
 # terminate before the requested optimization budget.
@@ -42,9 +45,9 @@ weight_decay: 1.0e-2
 
 wandb:
   enabled: true
-  project: light-wam-RMBench
-  name: put_back_block_no_memory_robotwin_style_5k_${now:%Y%m%d_%H%M%S}
-  group: rmbench_put_back_block_no_memory
+  project: RMBench_post-train
+  name: pbb-r460k-5k-s${seed}-${now:%m%d-%H%M}
+  group: pbb-r460k
   mode: online
 
 model:
