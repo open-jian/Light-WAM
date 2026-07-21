@@ -63,13 +63,13 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         video_only: bool = False,
         video_backend: Optional[str] = None,
         history_enabled: bool = False,
-        history_max_size: int = 12,
-        history_raw_stride: int = 4,
-        history_anchor_size: int = 0,
-        history_anchor_stride: int = 4,
-        history_recent_min_size: Optional[int] = None,
-        history_recent_max_size: Optional[int] = None,
-        history_recent_stride: Optional[int] = None,
+        history_max_size: int = 5,
+        history_raw_stride: int = 1,
+        history_anchor_size: int = 1,
+        history_anchor_stride: int = 1,
+        history_recent_min_size: Optional[int] = 1,
+        history_recent_max_size: Optional[int] = 4,
+        history_recent_stride: Optional[int] = 1,
     ):
         self.history_enabled = bool(history_enabled)
         self.history_max_size = int(history_max_size) if self.history_enabled else 0

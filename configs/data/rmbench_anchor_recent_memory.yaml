@@ -32,21 +32,21 @@ train:
   skip_padding_as_possible: false
   concat_multi_camera: robotwin
 
-  # Fixed slot layout: four episode-start anchors followed by up to eight
-  # recent observations. The current observation is never a history slot.
+  # Fixed slot layout: episode frame 0 followed by up to four immediately
+  # preceding raw observations. The current observation is never a history slot.
   history_enabled: true
-  history_max_size: 12
-  history_raw_stride: 4
-  history_anchor_size: 4
-  history_anchor_stride: 4
-  history_recent_min_size: 4
-  history_recent_max_size: 8
-  history_recent_stride: 4
+  history_max_size: 5
+  history_raw_stride: 1
+  history_anchor_size: 1
+  history_anchor_stride: 1
+  history_recent_min_size: 1
+  history_recent_max_size: 4
+  history_recent_stride: 1
 
   # Memory train/val caches are deliberately separate because the episode
   # split gives them different local sample indices.
   use_latent_cache: true
-  latent_cache_dir: ./data/latent_cache_Wan2.1-T2V-1.3B/rmbench_anchor_recent_memory/train
+  latent_cache_dir: ./data/latent_cache_Wan2.1-T2V-1.3B/rmbench_anchor1_recent1to4_memory/train
   processor:
     _target_: lightwam.datasets.lerobot.processors.lightwam_processor.LightWAMProcessor
     shape_meta: ${data.train.shape_meta}
@@ -98,7 +98,7 @@ val:
   history_recent_stride: ${data.train.history_recent_stride}
 
   use_latent_cache: true
-  latent_cache_dir: ./data/latent_cache_Wan2.1-T2V-1.3B/rmbench_anchor_recent_memory/val
+  latent_cache_dir: ./data/latent_cache_Wan2.1-T2V-1.3B/rmbench_anchor1_recent1to4_memory/val
   processor:
     _target_: lightwam.datasets.lerobot.processors.lightwam_processor.LightWAMProcessor
     shape_meta: ${data.train.shape_meta}

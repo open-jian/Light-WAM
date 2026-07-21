@@ -403,59 +403,57 @@ def test_random_window_size_stays_within_configured_bounds():
     model = object.__new__(LightWAM)
     torch.nn.Module.__init__(model)
     model.history_enabled = True
-    model.history_min_size = 8
-    model.history_max_size = 12
-    model.history_anchor_size = 4
-    model.history_recent_min_size = 4
-    model.history_recent_max_size = 8
+    model.history_min_size = 2
+    model.history_max_size = 5
+    model.history_anchor_size = 1
+    model.history_recent_min_size = 1
+    model.history_recent_max_size = 4
     model.device = torch.device("cpu")
     model.video_expert = torch.nn.Identity()
     # This is the actual adapter-training state: wrapper eval, expert train.
     model.eval()
     model.video_expert.train()
 
-    sampled = {model._sample_history_window_size() for _ in range(100)}
-    assert sampled <= set(range(8, 13))
-    assert len(sampled) > 1
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(123)
+        sampled = {model._sample_history_window_size() for _ in range(100)}
+    assert sampled == set(range(2, 6))
     model.video_expert.eval()
-    assert model._sample_history_window_size() == 12
+    assert model._sample_history_window_size() == 5
 
 
 def test_anchor_recent_slots_keep_start_and_recent_without_duplicates():
     indices, valid = build_anchor_recent_history_indices(
-        target_local_indices=[0, 20, 52],
+        target_local_indices=[0, 3, 8],
         episode_length=80,
-        history_max_size=12,
-        anchor_size=4,
-        anchor_stride=4,
-        recent_max_size=8,
-        recent_stride=4,
+        history_max_size=5,
+        anchor_size=1,
+        anchor_stride=1,
+        recent_max_size=4,
+        recent_stride=1,
     )
     assert valid[0].sum().item() == 0
-    assert indices[1, :4].tolist() == [0, 4, 8, 12]
-    assert valid[1, :4].all()
-    assert indices[1, -1].item() == 16
-    assert valid[1, 4:-1].sum().item() == 0
-    assert valid[1, -1]
-    assert indices[2].tolist() == [0, 4, 8, 12, 20, 24, 28, 32, 36, 40, 44, 48]
+    assert indices[1].tolist() == [0, 0, 0, 1, 2]
+    assert valid[1].tolist() == [True, False, False, True, True]
+    assert indices[2].tolist() == [0, 4, 5, 6, 7]
     assert valid[2].all()
-    assert not bool((indices[2][valid[2]] == 52).any().item())
+    assert not bool((indices[2][valid[2]] == 8).any().item())
 
-    short = apply_recent_window_mask(valid[2:3], anchor_size=4, recent_window_size=4)
-    assert short[0, :4].all()
-    assert not short[0, 4:8].any()
-    assert short[0, 8:].all()
+    short = apply_recent_window_mask(valid[2:3], anchor_size=1, recent_window_size=2)
+    assert short[0, :1].all()
+    assert not short[0, 1:3].any()
+    assert short[0, 3:].all()
 
 
-def test_robotwin_policy_samples_real_observations_every_four_steps_after_inference():
+def test_robotwin_policy_samples_every_natural_frame_after_inference():
     policy = object.__new__(WorldActionRobotWinPolicy)
     policy.history_enabled = True
-    policy.history_raw_stride = 4
-    policy.history_max_size = 12
-    policy.history_anchor_size = 4
-    policy.history_recent_max_size = 8
+    policy.history_raw_stride = 1
+    policy.history_max_size = 5
+    policy.history_anchor_size = 1
+    policy.history_recent_max_size = 4
     policy.anchor_observation_latents = []
-    policy.recent_observation_latents = deque(maxlen=8)
+    policy.recent_observation_latents = deque(maxlen=4)
     policy.pending_actions = deque()
     policy.step_count = 0
     policy.timing_enabled = False
@@ -495,22 +493,23 @@ def test_robotwin_policy_samples_real_observations_every_four_steps_after_infere
     assert [float(frame[0, 0, 0]) for frame in policy.anchor_observation_latents] == [0.0]
 
     policy.pending_actions.append(np.zeros(2, dtype=np.float32))
-    policy.step_count = 4
+    policy.step_count = 1
     assert policy.should_request_observation()
-    policy.step(env, {"id": 4})
+    policy.step(env, {"id": 1})
     assert observed_histories == [[]]  # no replan; only remember the real observation
-    assert [float(frame[0, 0, 0]) for frame in policy.anchor_observation_latents] == [0.0, 4.0]
+    assert [float(frame[0, 0, 0]) for frame in policy.anchor_observation_latents] == [0.0]
+    assert [float(frame[0, 0, 0]) for frame in policy.recent_observation_latents] == [1.0]
 
 
-def test_online_memory_keeps_four_anchors_and_evicts_only_recent_slots():
+def test_online_memory_keeps_frame_zero_and_four_latest_frames():
     policy = object.__new__(WorldActionRobotWinPolicy)
     policy.history_enabled = True
-    policy.history_max_size = 12
-    policy.history_anchor_size = 4
-    policy.history_recent_max_size = 8
+    policy.history_max_size = 5
+    policy.history_anchor_size = 1
+    policy.history_recent_max_size = 4
     policy.anchor_observation_latents = []
-    policy.recent_observation_latents = deque(maxlen=8)
-    for value in range(16):
+    policy.recent_observation_latents = deque(maxlen=4)
+    for value in range(8):
         policy._remember_observation_latent(
             torch.full((1, 1, 1), float(value), dtype=torch.float32)
         )
@@ -518,20 +517,7 @@ def test_online_memory_keeps_four_anchors_and_evicts_only_recent_slots():
     packed, valid = policy._pack_observation_memory()
 
     assert valid.all()
-    assert packed[0, :, 0, 0].tolist() == [
-        0.0,
-        1.0,
-        2.0,
-        3.0,
-        8.0,
-        9.0,
-        10.0,
-        11.0,
-        12.0,
-        13.0,
-        14.0,
-        15.0,
-    ]
+    assert packed[0, :, 0, 0].tolist() == [0.0, 4.0, 5.0, 6.0, 7.0]
 
 
 def test_future_output_backpropagates_to_old_history_without_leaking_back_to_current():

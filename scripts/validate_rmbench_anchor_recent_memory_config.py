@@ -24,24 +24,24 @@ EXPECTED_MODEL = {
     "enabled": True,
     "mode": "anchor_recent_fixed_slots_v1",
     "apply_to": "action_branch_only",
-    "min_size": 8,
-    "max_size": 12,
-    "raw_stride": 4,
-    "anchor_size": 4,
-    "anchor_stride": 4,
-    "recent_min_size": 4,
-    "recent_max_size": 8,
-    "recent_stride": 4,
+    "min_size": 2,
+    "max_size": 5,
+    "raw_stride": 1,
+    "anchor_size": 1,
+    "anchor_stride": 1,
+    "recent_min_size": 1,
+    "recent_max_size": 4,
+    "recent_stride": 1,
 }
 EXPECTED_DATA = {
     "history_enabled": True,
-    "history_max_size": 12,
-    "history_raw_stride": 4,
-    "history_anchor_size": 4,
-    "history_anchor_stride": 4,
-    "history_recent_min_size": 4,
-    "history_recent_max_size": 8,
-    "history_recent_stride": 4,
+    "history_max_size": 5,
+    "history_raw_stride": 1,
+    "history_anchor_size": 1,
+    "history_anchor_stride": 1,
+    "history_recent_min_size": 1,
+    "history_recent_max_size": 4,
+    "history_recent_stride": 1,
 }
 EXPECTED_EXPERIMENT = {
     "policy_memory": "anchor_recent_raw_observation",
@@ -90,9 +90,9 @@ def _validate(cfg: DictConfig) -> None:
             raise ValueError(
                 f"Memory contract violation: data.{split}.action_video_freq_ratio must be 4."
             )
-        if int(node.get("processor", {}).get("history_num_frames", -1)) != 12:
+        if int(node.get("processor", {}).get("history_num_frames", -1)) != 5:
             raise ValueError(
-                f"Memory contract violation: data.{split}.processor.history_num_frames must be 12."
+                f"Memory contract violation: data.{split}.processor.history_num_frames must be 5."
             )
 
     if str(cfg.data.train.latent_cache_dir) == str(cfg.data.val.latent_cache_dir):

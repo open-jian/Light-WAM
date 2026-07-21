@@ -14,14 +14,14 @@ model:
     enabled: true
     mode: anchor_recent_fixed_slots_v1
     apply_to: action_branch_only
-    min_size: 8
-    max_size: 12
-    raw_stride: 4
-    anchor_size: 4
-    anchor_stride: 4
-    recent_min_size: 4
-    recent_max_size: 8
-    recent_stride: 4
+    min_size: 2
+    max_size: 5
+    raw_stride: 1
+    anchor_size: 1
+    anchor_stride: 1
+    recent_min_size: 1
+    recent_max_size: 4
+    recent_stride: 1
 
 lr_scheduler_type: cosine
 learning_rate: 1e-4

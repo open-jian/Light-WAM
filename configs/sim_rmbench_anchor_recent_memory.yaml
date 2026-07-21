@@ -14,14 +14,14 @@ model:
   action_dit_pretrained_path: null
   history_memory:
     enabled: true
-    min_size: 8
-    max_size: 12
-    raw_stride: 4
-    anchor_size: 4
-    anchor_stride: 4
-    recent_min_size: 4
-    recent_max_size: 8
-    recent_stride: 4
+    min_size: 2
+    max_size: 5
+    raw_stride: 1
+    anchor_size: 1
+    anchor_stride: 1
+    recent_min_size: 1
+    recent_max_size: 4
+    recent_stride: 1
 
 EVALUATION:
   rmbench_root: /data2/jian/benchmark/RMBench/RMBench
@@ -31,7 +31,7 @@ EVALUATION:
   instruction_type: unseen
   eval_num_episodes: 100
   episode_seed_start: null
-  output_dir: ./Outputs/rmbench_anchor_recent_memory/eval/${now:%Y%m%d_%H%M%S}
+  output_dir: ./Outputs/rmbench_anchor1_recent1to4_memory/eval/${now:%Y%m%d_%H%M%S}
   official_result_tag: null
   use_training_run_config: true
   training_config_path: null
@@ -45,8 +45,8 @@ EVALUATION:
   rand_device: cpu
   tiled: false
   timing_enabled: false
-  # The policy still requests every fourth observation while consuming an
-  # action chunk, so online memory and offline history use the same stride.
+  # Let an evaluator consult policy.should_request_observation(); stride=1 makes
+  # the policy request every natural frame while consuming an action chunk.
   skip_get_obs_within_replan: true
   video_layout: multi_view
 

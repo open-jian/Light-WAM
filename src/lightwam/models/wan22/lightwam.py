@@ -58,11 +58,11 @@ class LightWAM(torch.nn.Module):
         video_latent_spatial_downsample_factor: int = 1,
         apply_video_latent_downsample_to_action_branch: bool = False,
         history_enabled: bool = False,
-        history_min_size: int = 4,
-        history_max_size: int = 12,
-        history_raw_stride: int = 4,
-        history_anchor_size: int = 0,
-        history_anchor_stride: int = 4,
+        history_min_size: int = 2,
+        history_max_size: int = 5,
+        history_raw_stride: int = 1,
+        history_anchor_size: int = 1,
+        history_anchor_stride: int = 1,
         history_recent_min_size: Optional[int] = None,
         history_recent_max_size: Optional[int] = None,
         history_recent_stride: Optional[int] = None,
@@ -149,7 +149,7 @@ class LightWAM(torch.nn.Module):
             else int(history_recent_max_size)
         )
         self.history_recent_min_size = (
-            self.history_min_size
+            self.history_min_size - self.history_anchor_size
             if history_recent_min_size is None
             else int(history_recent_min_size)
         )
@@ -458,11 +458,11 @@ class LightWAM(torch.nn.Module):
                 apply_video_latent_downsample_to_action_branch
             ),
             history_enabled=bool(history_memory_cfg.get("enabled", False)),
-            history_min_size=int(history_memory_cfg.get("min_size", 4)),
-            history_max_size=int(history_memory_cfg.get("max_size", 12)),
-            history_raw_stride=int(history_memory_cfg.get("raw_stride", 4)),
-            history_anchor_size=int(history_memory_cfg.get("anchor_size", 0)),
-            history_anchor_stride=int(history_memory_cfg.get("anchor_stride", 4)),
+            history_min_size=int(history_memory_cfg.get("min_size", 2)),
+            history_max_size=int(history_memory_cfg.get("max_size", 5)),
+            history_raw_stride=int(history_memory_cfg.get("raw_stride", 1)),
+            history_anchor_size=int(history_memory_cfg.get("anchor_size", 1)),
+            history_anchor_stride=int(history_memory_cfg.get("anchor_stride", 1)),
             history_recent_min_size=history_memory_cfg.get("recent_min_size"),
             history_recent_max_size=history_memory_cfg.get("recent_max_size"),
             history_recent_stride=history_memory_cfg.get("recent_stride"),

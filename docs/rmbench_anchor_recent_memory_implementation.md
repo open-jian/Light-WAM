@@ -6,8 +6,9 @@ persistent layer-KV proposal in `single_frame_observation_kv_memory_plan.md`.
 ## Contract
 
 - Current observation: one raw frame, encoded as an independent `T=1` VAE latent.
-- Memory: 12 fixed slots: 4 episode-start anchors (`0,4,8,12`) followed by 8 recent slots.
-- Recent training window: uniformly sampled `4..8`; anchors are never dropped.
+- Memory: 5 fixed slots: episode frame `0` followed by 4 recent slots.
+- Recent frames are consecutive natural frames (`t-4,t-3,t-2,t-1`), not stride-4 samples.
+- Recent training window: uniformly sampled `1..4`; frame-0 anchor is never dropped.
 - Current observation is excluded from its own history.
 - Memory affects only the StateFusion direct-MSE action branch. Video loss is unchanged.
 - Action horizon / execution / supervised prefix: `32 / 24 / 24`.
@@ -16,9 +17,10 @@ Offline episode-packed cache stores each sample's ordinary video latent once.
 History is gathered from source samples' first causal latent at read time; no
 `[target, history]` copies are stored.
 
-Online inference stores the first 4 sampled observation latents permanently and
-keeps the latest 8 thereafter. Each observation is VAE-encoded once. A current
-latent is committed only after action inference succeeds.
+Online inference stores frame 0 permanently and keeps the latest 4 observations.
+Because the memory stride is 1, these are consecutive environment observations,
+not four subsampled frames. Each observation is VAE-encoded once. A current latent
+is committed only after action inference succeeds.
 
 The fixed-slot action attention is still recomputed at each replan. Persistent
 per-layer KV reuse is a separate architecture and is not mixed into this run.
@@ -26,7 +28,7 @@ per-layer KV reuse is a separate architecture and is not mixed into this run.
 ## Fixed defects
 
 1. Random windows use the trainable video expert's train/eval state, so adapter
-   training really samples `4..8`; W&B logs `train/memory_recent_window_size`.
+   training really samples `1..4`; W&B logs `train/memory_recent_window_size`.
 2. Independent memory observations use temporal RoPE position 0 plus learned
    slot/type embeddings. The causal future-video branch never reads memory.
 3. Training, validation, cache precompute, RoboTwin/RMBench online policy, and

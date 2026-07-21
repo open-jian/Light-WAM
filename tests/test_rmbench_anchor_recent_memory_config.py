@@ -16,6 +16,11 @@ def _compose_memory_experiment():
         return compose(config_name="train", overrides=[f"experiment={EXPERIMENT}"])
 
 
+def _compose_memory_sim():
+    with initialize_config_dir(version_base="1.3", config_dir=str(ROOT / "configs")):
+        return compose(config_name="sim_rmbench_put_back_block_anchor_recent_memory_5k")
+
+
 def test_rmbench_anchor_recent_memory_contract_and_schedule() -> None:
     cfg = _compose_memory_experiment()
     _validate(cfg)
@@ -50,10 +55,22 @@ def test_rmbench_anchor_recent_memory_uses_split_episode_caches() -> None:
     assert train_cache != val_cache
     assert "episode_packed" in train_cache
     assert "episode_packed" in val_cache
-    assert cfg.data.train.history_anchor_size == 4
-    assert cfg.data.train.history_recent_min_size == 4
-    assert cfg.data.train.history_recent_max_size == 8
-    assert cfg.data.train.history_recent_stride == 4
+    assert cfg.data.train.history_anchor_size == 1
+    assert cfg.data.train.history_recent_min_size == 1
+    assert cfg.data.train.history_recent_max_size == 4
+    assert cfg.data.train.history_recent_stride == 1
+
+
+def test_rmbench_anchor_recent_memory_sim_uses_every_natural_frame() -> None:
+    cfg = _compose_memory_sim()
+
+    assert cfg.model.history_memory.anchor_size == 1
+    assert cfg.model.history_memory.recent_min_size == 1
+    assert cfg.model.history_memory.recent_max_size == 4
+    assert cfg.model.history_memory.raw_stride == 1
+    assert cfg.model.history_memory.recent_stride == 1
+    assert cfg.data.train.processor.history_num_frames == 5
+    assert cfg.EVALUATION.skip_get_obs_within_replan is True
 
 
 def test_rmbench_preflight_checks_both_split_caches(tmp_path: Path) -> None:
