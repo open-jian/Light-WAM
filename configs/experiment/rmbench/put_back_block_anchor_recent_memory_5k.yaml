@@ -5,7 +5,7 @@ defaults:
   - _self_
 
 experiment:
-  name: rmbench_pbb_anchor1_recent1to4_5k
+  name: rmbench_pbb_r460k_anchor1_recent1to4_5k
   task_name: put_back_block
   policy_memory: anchor_recent_raw_observation
   evaluation_profile: sim_rmbench_put_back_block_anchor_recent_memory_5k
@@ -20,10 +20,9 @@ launcher:
   accelerate_config_file: ./scripts/accelerate_configs/accelerate_zero1_ds.yaml
   expected_global_batch_size: 32
 
-# Start from the completed task-adapted 5k no-memory checkpoint. Override with
-# `resume=/path/to/step_005000.pt` if that run is moved.
-resume: ./runs/rmbench_no_memory/put_back_block/r460k_5k/2026-07-21_12-25-24/checkpoints/weights/step_005000.pt
-output_dir: ./runs/rmbench_anchor1_recent1to4_memory/put_back_block/no_mem_5k_to_memory_5k/${now:%Y-%m-%d_%H-%M-%S}
+# Post-train the official RoboTwin checkpoint directly on RMBench memory data.
+resume: ./checkpoints/lightwam_release/lightwam_robotwin/checkpoints/weights/step_460000.pt
+output_dir: ./runs/rmbench_anchor1_recent1to4_memory/put_back_block/r460k_to_memory_5k/${now:%Y-%m-%d_%H-%M-%S}
 
 # 4 processes * micro-batch 2 * accumulation 4 = global batch 32.
 batch_size: 2
@@ -47,7 +46,7 @@ memory_monitor:
 wandb:
   enabled: true
   project: RMBench_post-train
-  name: pbb-a1-r1to4-5k-s${seed}-${now:%m%d-%H%M}
+  name: pbb-r460k-a1-r1to4-5k-s${seed}-${now:%m%d-%H%M}
   group: pbb-anchor1-recent1to4-memory
   mode: online
 

@@ -815,6 +815,14 @@ class Wan22Trainer:
                 other_metrics[key] = value
         return timing_metrics, other_metrics
 
+    @staticmethod
+    def _wandb_key_for_train_metric(key: str) -> str:
+        """Keep memory diagnostics out of W&B's generic ``train`` group."""
+        key = str(key)
+        if key.startswith("memory_"):
+            return f"mem/{key}"
+        return f"train/{key}"
+
     def _consume_timing_metrics(self) -> dict[str, float]:
         metrics = dict(self._timing_accumulator)
         self._timing_accumulator.clear()
@@ -1918,7 +1926,7 @@ class Wan22Trainer:
                             "performance/samples_per_sec": steps_per_sec * self.batch_size * self.accelerator.num_processes,
                         }
                         for key, value in global_loss_metrics.items():
-                            wandb_payload[f"train/{key}"] = value
+                            wandb_payload[self._wandb_key_for_train_metric(key)] = value
                         for key, value in global_timing_metrics.items():
                             wandb_payload[key] = value
                         wandb_payload.update(global_memory_metrics)

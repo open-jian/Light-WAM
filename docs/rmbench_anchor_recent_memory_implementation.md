@@ -12,6 +12,8 @@ persistent layer-KV proposal in `single_frame_observation_kv_memory_plan.md`.
 - Current observation is excluded from its own history.
 - Memory affects only the StateFusion direct-MSE action branch. Video loss is unchanged.
 - Action horizon / execution / supervised prefix: `32 / 24 / 24`.
+- Initialization: official RoboTwin `step_460000.pt`; then 5,000 RMBench steps
+  with 1,000 warmup steps and checkpoints every 1,000 steps.
 
 Offline episode-packed cache stores each sample's ordinary video latent once.
 History is gathered from source samples' first causal latent at read time; no

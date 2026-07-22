@@ -850,3 +850,11 @@ def test_memory_monitor_uses_mem_metric_group():
     assert metrics["mem/video/current_grad_rms"] == 1.0
     assert metrics["mem/video/history_to_current_grad_ratio"] == 2.0
     assert all(key.startswith("mem/") for key in metrics)
+
+
+def test_memory_window_size_uses_mem_wandb_group():
+    assert (
+        Wan22Trainer._wandb_key_for_train_metric("memory_recent_window_size")
+        == "mem/memory_recent_window_size"
+    )
+    assert Wan22Trainer._wandb_key_for_train_metric("loss_action") == "train/loss_action"
